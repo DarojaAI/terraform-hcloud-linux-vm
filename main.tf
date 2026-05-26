@@ -12,12 +12,16 @@ provider "hcloud" {
 # =============================================================================
 
 resource "hcloud_server" "main" {
-  name        = var.server_name
-  server_type = var.server_type
-  location    = var.location
-  image       = var.image
+	name        = var.server_name
+	server_type = var.server_type
+	location    = var.location
+	image       = var.image
 
-  ssh_keys = var.hetzner_ssh_key_name != "" ? [var.hetzner_ssh_key_name] : var.ssh_keys
+	ssh_keys = var.hetzner_ssh_key_name != "" ? [var.hetzner_ssh_key_name] : var.ssh_keys
 
-  labels = var.labels
+	labels = var.labels
+
+	lifecycle {
+		prevent_destroy = true
+	}
 }
