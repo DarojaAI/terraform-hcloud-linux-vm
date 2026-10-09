@@ -23,5 +23,12 @@ resource "hcloud_server" "main" {
 
 	lifecycle {
 		prevent_destroy = true
+
+		# The image attribute is creation-time-only. Servers that were OS-
+		# upgraded in place (do-release-upgrade 22.04 -> 24.04 -> 26.04) keep
+		# their original image slug in the Hetzner API and in state; without
+		# this ignore_changes every plan would show an image "change" (=
+		# destroy/recreate) and prevent_destroy would refuse the deploy.
+		ignore_changes = [image]
 	}
 }
