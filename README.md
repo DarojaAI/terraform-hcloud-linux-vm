@@ -287,16 +287,65 @@ resource "hcloud_firewall" "desktop" {
 
 ---
 
+## Git Pinning (issue #2323)
+
+This module owns the **git pin**: it builds git `2.56.0` from the canonical
+[kernel.org tarball](https://www.kernel.org/pub/software/scm/git/git-2.56.0.tar.gz)
+into `/opt/git-2.56.0` and ships the pinned binary on PATH. Previously this
+lived only in the retiring L2 repo (`linux-desktop-seed`) and its installer was
+`/tmp`-ephemeral, so a `/tmp` clean or image refresh lost the ability to repair
+the pin and a guard script once overwrote the compiled binary (breaking
+`git --version`). That is all corrected here.
+
+### How it ships & survives image rebuilds
+
+- `scripts/git-pin.sh` is the single source of truth. It is wired in as
+  `hcloud_server.user_data` (cloud-init), so **every VM this module creates
+  provisions the pin on first boot** — a fresh image rebuild therefore
+  re-provisions it automatically.
+- The script **self-copies to `/opt/git-pin.sh`**, so an operator can always
+  repair/rebuild the pin later with `sudo bash /opt/git-pin.sh` — it no longer
+  lives only in ephemeral `/tmp`.
+- Setting `user_data` is **not** `ForceNew`, so reconfiguring existing servers
+  never destroys them.
+
+### Guard / wrapper layout contract (never overwrite binaries)
+
+- `/opt/git-2.56.0/bin/git` — the **real compiled ELF binary**. It must never
+  be a guard or a script at this path. This is what was clobbered before.
+- `/usr/local/bin/git` — a **wrapper script** that `exec`s the pinned binary.
+  Any guard/shim logic belongs here, at its own path, preserving the binary.
+- To guard git, place the guard logic **in the wrapper** (or another shim path)
+  and have it `exec /opt/git-2.56.0/bin/git` — never write a guard over the
+  binary itself.
+
+### Clobber detection
+
+The script is idempotent, but its short-circuit is **sanity-checked**: it skips
+only when `/opt/git-2.56.0/bin/git` exists **and** is a real ELF binary. If a
+guard script (or any text) was ever written over the binary path, the file is
+not ELF, so the script **rebuilds/repairs** the pin instead of blindly skipping.
+
+---
+
 ## Performance & Limitations
 
 | Metric | Value |
 |---|---|
 | Provision time | 1–3 minutes (Hetzner usually fast, can take longer under load) |
+| First-boot git build | +2–5 min on the first boot of a fresh VM (only when the pin is absent; idempotent afterwards) |
 | Server status check | Immediate via `hcloud_server.main.status` output |
 | Idle cost |取决于 server_type — see pricing table above |
 
 **Known limitations:**
 
+- **First boot builds git from source** — every new VM this module creates
+  compiles git 2.56.0 (via cloud-init `user_data`) to provision the pin. It is
+  idempotent and skipped when `/opt/git-2.56.0/bin/git` is already a real
+  binary, but a fresh image incurs a one-time build.
+- **In-place OS upgrades (same instance, `ignore_changes = [image]`) do not
+  re-run `user_data`.** The pin survives because `/opt` is untouched; to
+  re-assert after drift, run `sudo bash /opt/git-pin.sh`.
 - **No firewall rules** — must be created separately
 - **No multi-region** — this module creates a single server in one location
 - **No high availability** — single VM, single AZ
@@ -346,7 +395,9 @@ Then run `terraform plan` to verify the imported state matches your configuratio
 
 ```
 terraform-hcloud-linux-desktop/
-├── main.tf         ← hcloud_server resource
+├── main.tf         ← hcloud_server resource (incl. git-pin user_data)
+├── scripts/        ← provisioner scripts shipped to the VM
+│   └── git-pin.sh  ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
 ├── variables.tf    ← all configurable inputs
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
