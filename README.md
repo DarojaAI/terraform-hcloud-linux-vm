@@ -21,6 +21,7 @@ Terraform module for provisioning a Linux desktop server on Hetzner Cloud.
   - [Outputs](#outputs)
   - [Configuration](#configuration)
 - [Security Considerations](#security-considerations)
+- [Host Hygiene](#host-hygiene)
 - [Performance & Limitations](#performance--limitations)
 - [Troubleshooting](#troubleshooting)
 - [Documentation](#documentation)
@@ -192,6 +193,12 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `hetzner_ssh_key_name` | Name of a single SSH key in Hetzner. Alternative to `ssh_keys` for simpler setups | `string` | `""` | No |
 | `ssh_public_key` | SSH public key content to inject at boot for passwordless access | `string` | `""` | No |
 | `labels` | Key-value pairs to apply as labels to the server. Useful for organization and cost tracking | `map(string)` | `{}` | No |
+| `journald_max_use` | journald `SystemMaxUse` cap (journald size syntax, e.g. `500M`, `1G`) — bounds the journal so it can never fill the root disk | `string` | `"1G"` | No |
+| `enable_docker_prune` | Install & enable the weekly docker-prune timer (`docker system prune -f --filter until=…`; never `-a`, never volumes). Ignored on VMs without docker | `bool` | `true` | No |
+| `docker_prune_until` | Age filter for docker-prune (`--filter until=…`), e.g. `24h`, `168h` | `string` | `"168h"` | No |
+| `enable_unattended_upgrades` | Ensure `unattended-upgrades` runs SECURITY-ONLY auto-upgrades (no auto-reboot) | `bool` | `true` | No |
+| `disk_alert_pct` | Root-filesystem used-% threshold for the weekly disk-watch alarm; `0` disables the alarm | `number` | `85` | No |
+| `disk_alert_webhook_url` | Optional webhook URL for disk-watch alarm JSON POSTs; empty = off (journald marker always fires) | `string` | `""` | No |
 
 #### Server Type Reference
 
@@ -328,12 +335,86 @@ not ELF, so the script **rebuilds/repairs** the pin instead of blindly skipping.
 
 ---
 
+## Host Hygiene
+
+Every VM this module creates is born **bounded**: `scripts/first-boot.sh`
+(user_data) runs the generic host-hygiene engine `scripts/host-hygiene.sh`,
+which installs four workload-agnostic bounds:
+
+1. **journald cap** — `/etc/systemd/journald.conf.d/90-host-hygiene.conf` sets
+   `SystemMaxUse` (default `1G`), so the journal can never fill the root disk.
+2. **docker-prune timer** — weekly systemd timer running
+   `docker system prune -f --filter "until=<…>"` (default `168h`). Prunes
+   dangling images only: never `-a`, never volumes (volume prune is
+   destructive and workload-specific). Skips cleanly on VMs without docker.
+3. **unattended security upgrades** — `unattended-upgrades` is verified (and
+   installed if absent) and configured for **security-only** origins
+   (`${distro_id}:${distro_codename}-security`) with **no automatic reboot**.
+4. **disk-watch alarm** — weekly timer checks root-filesystem usage against a
+   threshold (default `85%`). On alarm it emits a loud journald
+   `user.warning` marker and, if a webhook URL is configured, POSTs a JSON
+   alert. `disk_alert_pct = 0` disables the alarm.
+
+### What runs when
+
+| Item | Installed by | Schedule | Fires | Scope |
+|---|---|---|---|---|
+| journald cap | first boot (`user_data`) + bootstrap | one-time config, reapplied on every re-run | immediately (`systemd-journald` restart) | every VM |
+| docker-prune timer | first boot + bootstrap | weekly (`OnCalendar=weekly`, `Persistent=true`) | `docker-prune.timer` | only VMs with docker installed |
+| unattended security upgrades | first boot + bootstrap | daily (`apt-daily-upgrade.timer`) | apt `APT::Periodic::Unattended-Upgrade` | every VM, security origins only |
+| disk-watch alarm | first boot + bootstrap | weekly (`Persistent=true`) | `disk-watch.timer` → `/usr/local/bin/host-hygiene-disk-watch.sh` | every VM (threshold var; `0` = off) |
+
+### Knobs
+
+All knobs are module variables (see the [Inputs](#inputs) table), flow into
+`user_data` as `HYGIENE_*` env vars, and have sane defaults:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `journald_max_use` | `"1G"` | journald `SystemMaxUse` cap |
+| `enable_docker_prune` | `true` | install/enable the weekly docker-prune timer |
+| `docker_prune_until` | `"168h"` | age filter for `docker system prune --filter until=…` |
+| `enable_unattended_upgrades` | `true` | security-only auto-upgrades, no auto-reboot |
+| `disk_alert_pct` | `85` | root-used % alarm threshold (`0` disables) |
+| `disk_alert_webhook_url` | `""` | webhook for alarm POSTs (empty = off; journald marker always fires) |
+
+### Existing VMs (bootstrap)
+
+Already-provisioned VMs get the same bounds in ~2 minutes with the idempotent
+bootstrapper (dry-run by default; installs only, never deletes anything):
+
+```bash
+# On the target VM, as root, from this checkout:
+sudo bash scripts/bootstrap-hygiene.sh            # dry run — prints what would change
+sudo bash scripts/bootstrap-hygiene.sh --apply    # apply (idempotent — re-run anytime)
+```
+
+Per-run overrides use `HYGIENE_*` env vars matching the module defaults, e.g.:
+
+```bash
+sudo HYGIENE_DISK_ALERT_PCT=90 bash scripts/bootstrap-hygiene.sh --apply
+```
+
+The engine also self-copies to `/opt/host-hygiene.sh`, so a re-run is just
+`sudo bash /opt/host-hygiene.sh` (no checkout needed).
+
+### Layering
+
+L1 ships **generic bounds only** — safe for any workload. Workload-specific
+retention (capture/tool-output pruners, disk-warden, growth reports) is
+deliberately out of scope here and lives at user scope in
+[linux-desktop-seed](https://github.com/DarojaAI/linux-desktop-seed), where
+per-workload retention policies belong.
+
+---
+
 ## Performance & Limitations
 
 | Metric | Value |
 |---|---|
 | Provision time | 1–3 minutes (Hetzner usually fast, can take longer under load) |
 | First-boot git build | +2–5 min on the first boot of a fresh VM (only when the pin is absent; idempotent afterwards) |
+| First-boot host hygiene | seconds — journald drop-in, two timers, apt fragments (unattended-upgrades package only when missing) |
 | Server status check | Immediate via `hcloud_server.main.status` output |
 | Idle cost |取决于 server_type — see pricing table above |
 
@@ -395,10 +476,13 @@ Then run `terraform plan` to verify the imported state matches your configuratio
 
 ```
 terraform-hcloud-linux-desktop/
-├── main.tf         ← hcloud_server resource (incl. git-pin user_data)
+├── main.tf         ← hcloud_server resource (first-boot user_data template)
 ├── scripts/        ← provisioner scripts shipped to the VM
-│   └── git-pin.sh  ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
-├── variables.tf    ← all configurable inputs
+│   ├── first-boot.sh        ← user_data umbrella: embeds the two engines below
+│   ├── git-pin.sh           ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
+│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch)
+│   └── bootstrap-hygiene.sh ← idempotent bootstrap for already-provisioned VMs
+├── variables.tf    ← all configurable inputs (incl. host-hygiene knobs)
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
 ├── README.md       ← this file

@@ -19,13 +19,24 @@ resource "hcloud_server" "main" {
 
   ssh_keys = var.hetzner_ssh_key_name != "" ? [var.hetzner_ssh_key_name] : var.ssh_keys
 
-  # First-boot provisioning of the pinned git (issue #2323). It ships
-  # scripts/git-pin.sh to cloud-init so /opt/git-2.56.0 is built from the
-  # kernel.org tarball and survives image rebuilds. Idempotent, and skips
-  # only when /opt/git-2.56.0/bin/git is a real ELF binary (a clobbered
-  # guard script at that path triggers a rebuild/repair). user_data is not
-  # ForceNew, so updating it never destroys existing servers.
-  user_data = file("${path.module}/scripts/git-pin.sh")
+  # First-boot provisioning: pinned git (issue #2323) + generic host hygiene.
+  # scripts/first-boot.sh is a templatefile that embeds scripts/git-pin.sh and
+  # scripts/host-hygiene.sh as substitution values (they stay the single
+  # source of truth for their engines) and exports this module's hygiene
+  # variables as HYGIENE_* env vars for the engine. Both engines are
+  # idempotent, and user_data is not ForceNew, so changing hygiene knobs or
+  # re-applying never destroys existing servers. Existing VMs can be brought
+  # up to date with `sudo bash scripts/bootstrap-hygiene.sh --apply` (README).
+  user_data = templatefile("${path.module}/scripts/first-boot.sh", {
+    git_pin_script              = file("${path.module}/scripts/git-pin.sh")
+    hygiene_script              = file("${path.module}/scripts/host-hygiene.sh")
+    hygiene_journald_max_use    = var.journald_max_use
+    hygiene_docker_prune        = tostring(var.enable_docker_prune)
+    hygiene_docker_prune_until  = var.docker_prune_until
+    hygiene_unattended_upgrades = tostring(var.enable_unattended_upgrades)
+    hygiene_disk_alert_pct      = tostring(var.disk_alert_pct)
+    hygiene_disk_webhook_url    = var.disk_alert_webhook_url
+  })
 
   labels = var.labels
 
