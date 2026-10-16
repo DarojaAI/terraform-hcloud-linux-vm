@@ -56,3 +56,58 @@ variable "labels" {
     managed_by = "terraform"
   }
 }
+
+# =============================================================================
+# Host hygiene (generic, workload-agnostic bounds — L1 scope)
+# =============================================================================
+
+variable "journald_max_use" {
+  description = "journald SystemMaxUse cap written to /etc/systemd/journald.conf.d/90-host-hygiene.conf (journald size syntax, e.g. 100M, 1G). Bounds the journal so it can never fill the root disk."
+  type        = string
+  default     = "1G"
+
+  validation {
+    condition     = can(regex("^[0-9]+[KMG]?$", var.journald_max_use))
+    error_message = "journald_max_use must be a journald size such as \"500M\", \"1G\", or a plain byte count."
+  }
+}
+
+variable "enable_docker_prune" {
+  description = "Install and enable the weekly docker-prune systemd timer (prunes dangling images with `docker system prune -f --filter until=...`; never -a, never volumes). Ignored on VMs without docker."
+  type        = bool
+  default     = true
+}
+
+variable "docker_prune_until" {
+  description = "Age filter for the docker-prune timer (`docker system prune --filter until=...`), e.g. 24h, 7d via h/m. Reclaimed only for images older than this."
+  type        = string
+  default     = "168h"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smhd]$", var.docker_prune_until))
+    error_message = "docker_prune_until must be a docker duration such as \"24h\" or \"168h\" (digits followed by s/m/h/d)."
+  }
+}
+
+variable "enable_unattended_upgrades" {
+  description = "Ensure unattended-upgrades is installed and configured for SECURITY-ONLY automatic upgrades ($${distro_id}:$${distro_codename}-security origins) with no automatic reboot."
+  type        = bool
+  default     = true
+}
+
+variable "disk_alert_pct" {
+  description = "Root-filesystem used-percent threshold for the weekly generic disk-watch alarm (0 disables the alarm). When crossed it emits a loud journald warning marker and, if disk_alert_webhook_url is set, POSTs a JSON alert."
+  type        = number
+  default     = 85
+
+  validation {
+    condition     = var.disk_alert_pct >= 0 && var.disk_alert_pct <= 100
+    error_message = "disk_alert_pct must be between 0 (alarm off) and 100."
+  }
+}
+
+variable "disk_alert_webhook_url" {
+  description = "Optional webhook URL for disk-watch alarms (JSON POST on alarm). Empty string disables webhook delivery; the journald marker is always emitted."
+  type        = string
+  default     = ""
+}
