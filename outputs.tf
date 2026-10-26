@@ -31,3 +31,12 @@ output "server_status" {
   description = "Current server status"
   value       = hcloud_server.main.status
 }
+output "firewall_id" {
+  description = "ID of the Lane C paperclip test-VM firewall (only set when create_firewall=true and firewall_target_env=test)"
+  value       = try(hcloud_firewall.paperclip_test_vm[0].id, null)
+}
+
+output "firewall_name" {
+  description = "Name of the Lane C paperclip test-VM firewall"
+  value       = try(hcloud_firewall.paperclip_test_vm[0].name, null)
+}
