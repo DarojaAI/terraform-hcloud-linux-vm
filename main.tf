@@ -51,3 +51,68 @@ resource "hcloud_server" "main" {
     ignore_changes = [image]
   }
 }
+# =============================================================================
+# Firewall (Lane C — test VM only, TCP 80/443 for caddy ACME HTTP-01 + exposure)
+# =============================================================================
+# Per DarojaAI/terraform-hcloud-linux-vm#7: Paperclip exposure on the test VM
+# needs ACME HTTP-01 (port 80) + basicauth-fronted exposure (port 443). Source
+# IPs are 0.0.0.0/0 + ::/0 — Let's Encrypt publishes no fixed validator IP
+# list, and the exposure is basicauth-protected so a wide allowlist is the
+# right tradeoff vs. cert renewal flakiness. Test VM only; head/prod are
+# intentionally NOT exposed (paperclip ENABLE_PAPERCLIP gating + the
+# pipeline-gating bats keep head/prod off this code path).
+#
+# Toggle: create_firewall (default true) so consumers can disable without
+# editing HCL. The firewall itself is gated on var.firewall_target_env
+# (test|head|prod) so accidentally setting create_firewall=true on a
+# non-test consumer can never widen a head/prod surface.
+
+variable "create_firewall" {
+  description = "Create the hcloud_firewall and attach it to the server. Default true (Lane C test-VM exposure). Set false for consumers that manage firewall externally (e.g. via hcloud CLI)."
+  type        = bool
+  default     = true
+}
+
+variable "firewall_target_env" {
+  description = "Which environment is this VM for? Must be 'test' to create the Lane C paperclip firewall (TCP 80+443 from 0.0.0.0/0 + ::/0). 'head' or 'prod' refuse — paperclip exposure is test-only. Issue DarojaAI/terraform-hcloud-linux-vm#7."
+  type        = string
+  default     = "test"
+
+  validation {
+    condition     = contains(["test", "head", "prod"], var.firewall_target_env)
+    error_message = "firewall_target_env must be one of: test, head, prod."
+  }
+}
+
+resource "hcloud_firewall" "paperclip_test_vm" {
+  count = var.create_firewall && var.firewall_target_env == "test" ? 1 : 0
+  name  = "${var.server_name}-paperclip-test-fw"
+
+  # ACME HTTP-01 challenge path. Source: 0.0.0.0/0 + ::/0 (LE publishes no
+  # fixed validator IP list).
+  rule {
+    direction       = "in"
+    protocol        = "tcp"
+    port            = "80"
+    source_ips      = ["0.0.0.0/0", "::/0"]
+    destination_ips = [hcloud_server.main.ipv4_address, hcloud_server.main.ipv6_address]
+  }
+
+  # Basicauth-fronted Paperclip exposure on :443. Source: 0.0.0.0/0 + ::/0
+  # (caddy serves the basicauth prompt; an allowlist would deny browser
+  # access from unknown IPs without warning).
+  rule {
+    direction       = "in"
+    protocol        = "tcp"
+    port            = "443"
+    source_ips      = ["0.0.0.0/0", "::/0"]
+    destination_ips = [hcloud_server.main.ipv4_address, hcloud_server.main.ipv6_address]
+  }
+}
+
+resource "hcloud_firewall_attachment" "paperclip_test_vm" {
+  count        = var.create_firewall && var.firewall_target_env == "test" ? 1 : 0
+  firewall_id  = hcloud_firewall.paperclip_test_vm[0].id
+  server_ids   = [hcloud_server.main.id]
+  depends_on   = [hcloud_firewall.paperclip_test_vm]
+}
