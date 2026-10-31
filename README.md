@@ -199,6 +199,7 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `enable_unattended_upgrades` | Ensure `unattended-upgrades` runs SECURITY-ONLY auto-upgrades (no auto-reboot) | `bool` | `true` | No |
 | `disk_alert_pct` | Root-filesystem used-% threshold for the weekly disk-watch alarm; `0` disables the alarm | `number` | `85` | No |
 | `disk_alert_webhook_url` | Optional webhook URL for disk-watch alarm JSON POSTs; empty = off (journald marker always fires) | `string` | `""` | No |
+| `sshd_max_startups` | MaxStartups triple for the sshd drop-in `09-sshd-limits.conf`; `"0"` stops managing sshd bounds | `string` | `"40:30:100"` | No |
 
 #### Server Type Reference
 
@@ -339,7 +340,7 @@ not ELF, so the script **rebuilds/repairs** the pin instead of blindly skipping.
 
 Every VM this module creates is born **bounded**: `scripts/first-boot.sh`
 (user_data) runs the generic host-hygiene engine `scripts/host-hygiene.sh`,
-which installs four workload-agnostic bounds:
+which installs five workload-agnostic bounds:
 
 1. **journald cap** — `/etc/systemd/journald.conf.d/90-host-hygiene.conf` sets
    `SystemMaxUse` (default `1G`), so the journal can never fill the root disk.
@@ -354,6 +355,16 @@ which installs four workload-agnostic bounds:
    threshold (default `85%`). On alarm it emits a loud journald
    `user.warning` marker and, if a webhook URL is configured, POSTs a JSON
    alert. `disk_alert_pct = 0` disables the alarm.
+5. **sshd connection bounds** — `/etc/ssh/sshd_config.d/09-sshd-limits.conf`
+   sets `MaxStartups` (default `40:30:100`), `MaxSessions` (`20`) and
+   keepalives (`ClientAliveInterval` `60`s, `ClientAliveCountMax` `3`). The
+   `09-` prefix sorts before (and shadows — sshd `Include` sits at the top of
+   `sshd_config` and keeps the **first** value it reads) the retired L2 repo's
+   `10-l2.conf`, whose `MaxStartups 3:50:10` dropped 50% of unauthenticated
+   connections at random from the 3rd scanner in — 54 `drop connection …
+   Maxstartups` events in 6 h on the test VM and CI runners failing with
+   `kex_exchange_identification: read: Connection reset by peer`.
+   `sshd_max_startups = "0"` disables sshd management entirely.
 
 ### What runs when
 
@@ -363,6 +374,7 @@ which installs four workload-agnostic bounds:
 | docker-prune timer | first boot + bootstrap | weekly (`OnCalendar=weekly`, `Persistent=true`) | `docker-prune.timer` | only VMs with docker installed |
 | unattended security upgrades | first boot + bootstrap | daily (`apt-daily-upgrade.timer`) | apt `APT::Periodic::Unattended-Upgrade` | every VM, security origins only |
 | disk-watch alarm | first boot + bootstrap | weekly (`Persistent=true`) | `disk-watch.timer` → `/usr/local/bin/host-hygiene-disk-watch.sh` | every VM (threshold var; `0` = off) |
+| sshd connection bounds | first boot + bootstrap | immediate (`sshd -t` + reload + effective-value assert) | `sshd` daemon (drop-in `09-sshd-limits.conf`) | every VM (`sshd_max_startups = "0"` = off) |
 
 ### Knobs
 
@@ -377,6 +389,10 @@ All knobs are module variables (see the [Inputs](#inputs) table), flow into
 | `enable_unattended_upgrades` | `true` | security-only auto-upgrades, no auto-reboot |
 | `disk_alert_pct` | `85` | root-used % alarm threshold (`0` disables) |
 | `disk_alert_webhook_url` | `""` | webhook for alarm POSTs (empty = off; journald marker always fires) |
+| `sshd_max_startups` | `"40:30:100"` | sshd `MaxStartups` triple (09- drop-in); `"0"`/empty = don't manage sshd |
+| `sshd_max_sessions` | `20` | sshd `MaxSessions` |
+| `sshd_keepalive_interval` | `60` | sshd `ClientAliveInterval` seconds |
+| `sshd_keepalive_count` | `3` | sshd `ClientAliveCountMax` |
 
 ### Existing VMs (bootstrap)
 
@@ -480,9 +496,10 @@ terraform-hcloud-linux-desktop/
 ├── scripts/        ← provisioner scripts shipped to the VM
 │   ├── first-boot.sh        ← user_data umbrella: embeds the two engines below
 │   ├── git-pin.sh           ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
-│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch)
+│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch, sshd bounds)
 │   └── bootstrap-hygiene.sh ← idempotent bootstrap for already-provisioned VMs
 ├── variables.tf    ← all configurable inputs (incl. host-hygiene knobs)
+├── tests/          ← hermetic self-tests (tests/sshd-limits.bats)
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
 ├── README.md       ← this file

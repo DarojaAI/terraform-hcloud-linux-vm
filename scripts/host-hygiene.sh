@@ -7,6 +7,7 @@
 #   3. unattended security-only auto-upgrades (no auto-reboot)
 #                                                   — /etc/apt/apt.conf.d/52host-hygiene-*
 #   4. generic disk-watch alarm — systemd weekly timer + /usr/local/bin watchdog
+#   5. sshd connection bounds  — /etc/ssh/sshd_config.d/09-sshd-limits.conf
 #
 # Deliberately NOT here (layering): workload-specific retention (capture
 # pruner, disk-warden, growth report) lives in linux-desktop-seed at user
@@ -79,6 +80,13 @@ systemctl_apply() {
 : "${HYGIENE_DOCKER_PRUNE_UNTIL:=168h}"
 : "${HYGIENE_UNATTENDED_UPGRADES:=true}"
 : "${HYGIENE_DISK_ALERT_PCT:=85}"
+: "${HYGIENE_SSHD_MAX_SESSIONS:=20}"
+: "${HYGIENE_SSHD_KEEPALIVE_INTERVAL:=60}"
+: "${HYGIENE_SSHD_KEEPALIVE_COUNT:=3}"
+# HYGIENE_SSHD_MAX_STARTUPS (the sshd-bounds gate) is deliberately NOT
+# defaulted here: `0` or an explicitly empty value opts out of sshd
+# management entirely; unset falls back to the module default 40:30:100
+# inside section 5.
 # HYGIENE_DISK_WEBHOOK_URL is optional; empty/absent = webhook off.
 
 # ── Persist a canonical copy for operator re-runs (mirrors git-pin.sh) ──
@@ -299,6 +307,100 @@ EOF
 		systemctl_apply daemon-reload
 		systemctl_apply enable --now disk-watch.timer
 		info "disk-watch timer installed and enabled (threshold ${HYGIENE_DISK_ALERT_PCT}%, webhook $([ -n "$HYGIENE_DISK_WEBHOOK_URL" ] && echo on || echo off))"
+	fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5. sshd connection bounds (var-gated; 0/empty = do not manage sshd)
+# ═══════════════════════════════════════════════════════════════════════
+# Ships MaxStartups + MaxSessions + keepalives via /etc/ssh/sshd_config.d/
+# 09-sshd-limits.conf. The 09- prefix sorts BEFORE the retired L2 repo's
+# `10-l2.conf` (MaxStartups 3:50:10): sshd's Include sits at the TOP of
+# sshd_config and sshd keeps the FIRST value it reads, so the earlier-
+# sorting drop-in always wins. Evidence (DarojaAI/terraform-hcloud-linux-vm
+# #9): 54 `drop connection ... Maxstartups` events in 6 h on the test VM —
+# from the 3rd concurrent unauthenticated connection the 3:50:10 policy
+# drops 50% at random, so internet scanners starve GitHub Actions runners
+# (every deploy's SSH layer flaked with `kex_exchange_identification: read:
+# Connection reset by peer`).
+#
+# Legacy migration (explicit, evidence-preserving; installs only — nothing
+# is deleted): a `10-l2.conf` that still carries `MaxStartups 3:50:10` is
+# renamed in place to `10-l2.conf.disabled-<UTC ts>`. Any other content is
+# left untouched.
+
+# Renders the drop-in from the configured knobs. Pure function (stdout) so
+# tests/sshd-limits.bats can render it into a temp dir hermetically without
+# running the engine against the real /etc/ssh.
+sshd_limits_dropin() {
+	cat <<-EOF
+	# sshd connection bounds - L1 host hygiene (scripts/host-hygiene.sh section 5).
+	# Hardens the SSH surface against connection-exhaustion flakes (issue #9).
+	# This file sorts BEFORE the retired L2 repo's 10-l2.conf (MaxStartups
+	# 3:50:10): sshd Include sits at the top of sshd_config and sshd keeps the
+	# FIRST value it reads, so 09- wins. Evidence: 54 'drop connection ...
+	# Maxstartups' events in 6 h on the test VM; CI runners failed with
+	# 'kex_exchange_identification: read: Connection reset by peer'.
+	MaxStartups $HYGIENE_SSHD_MAX_STARTUPS
+	MaxSessions $HYGIENE_SSHD_MAX_SESSIONS
+	ClientAliveInterval $HYGIENE_SSHD_KEEPALIVE_INTERVAL
+	ClientAliveCountMax $HYGIENE_SSHD_KEEPALIVE_COUNT
+	EOF
+}
+
+SSHD_CONFIG_D=/etc/ssh/sshd_config.d
+SSH_DROP_IN=$SSHD_CONFIG_D/09-sshd-limits.conf
+LEGACY_DROP_IN=$SSHD_CONFIG_D/10-l2.conf
+
+# Gate: `0` or an explicitly empty value opts out of sshd management entirely
+# (the other HYGIENE_SSHD_* knobs are then ignored); unset falls back to the
+# module default 40:30:100 so the engine stays valid standalone.
+SSHD_MANAGE=1
+if [ -n "${HYGIENE_SSHD_MAX_STARTUPS+x}" ]; then
+	if [ -z "$HYGIENE_SSHD_MAX_STARTUPS" ] || [ "$HYGIENE_SSHD_MAX_STARTUPS" = "0" ]; then
+		SSHD_MANAGE=0
+	fi
+fi
+if [ "$SSHD_MANAGE" = 0 ]; then
+	warn "sshd bounds: skipped — HYGIENE_SSHD_MAX_STARTUPS is 0/empty (sshd not managed)"
+else
+	: "${HYGIENE_SSHD_MAX_STARTUPS:=40:30:100}"
+	info "sshd bounds: max_startups=$HYGIENE_SSHD_MAX_STARTUPS max_sessions=$HYGIENE_SSHD_MAX_SESSIONS keepalive=${HYGIENE_SSHD_KEEPALIVE_INTERVAL}s x${HYGIENE_SSHD_KEEPALIVE_COUNT} -> $SSH_DROP_IN"
+
+	if [ -n "$HYGIENE_DRY_RUN" ]; then
+		info "DRY RUN: would write $SSH_DROP_IN (mode 0644)"
+		if [ -f "$LEGACY_DROP_IN" ] && grep -qi '^[[:space:]]*maxstartups[[:space:]]*3:50:10' "$LEGACY_DROP_IN"; then
+			warn "DRY RUN: would rename $LEGACY_DROP_IN to $LEGACY_DROP_IN.disabled-$(date -u +%Y%m%dT%H%M%SZ) (still sets MaxStartups 3:50:10 from the retired L2 repo — would shadow this 09- drop-in)"
+		fi
+		info "DRY RUN: would run: sshd -t; systemctl reload ssh (fallback: sshd); then assert 'sshd -T | grep -i ^maxstartups' == $HYGIENE_SSHD_MAX_STARTUPS"
+	else
+		mkdir -p "$SSHD_CONFIG_D"
+		sshd_limits_dropin > "$SSH_DROP_IN.tmp"
+		chmod 0644 "$SSH_DROP_IN.tmp"
+		mv -f "$SSH_DROP_IN.tmp" "$SSH_DROP_IN"
+		info "sshd bounds written: MaxStartups=$HYGIENE_SSHD_MAX_STARTUPS MaxSessions=$HYGIENE_SSHD_MAX_SESSIONS keepalive=${HYGIENE_SSHD_KEEPALIVE_INTERVAL}s x${HYGIENE_SSHD_KEEPALIVE_COUNT} ($SSH_DROP_IN, mode 0644)"
+
+		# Legacy migration: rename (never delete) any 10-l2.conf that still
+		# sets the retired L2 repo's MaxStartups 3:50:10, so it can no longer
+		# shadow this drop-in. Any other content is left untouched.
+		if [ -f "$LEGACY_DROP_IN" ] && grep -qi '^[[:space:]]*maxstartups[[:space:]]*3:50:10' "$LEGACY_DROP_IN"; then
+			LEGACY_RENAMED="$LEGACY_DROP_IN.disabled-$(date -u +%Y%m%dT%H%M%SZ)"
+			mv -f "$LEGACY_DROP_IN" "$LEGACY_RENAMED"
+			warn "renamed $LEGACY_DROP_IN -> $LEGACY_RENAMED (sets MaxStartups 3:50:10 from the retired L2 repo; the L1 09- drop-in now owns sshd bounds)"
+		fi
+
+		# Fail loud, restore nothing silently: validate the config, reload
+		# sshd, then assert the effective value sshd actually reads.
+		sshd -t
+		if ! systemctl reload ssh 2>/dev/null; then
+			systemctl reload sshd
+		fi
+		EFFECTIVE=$(sshd -T | grep -i '^maxstartups' | awk '{print $2}')
+		if [ "$EFFECTIVE" != "$HYGIENE_SSHD_MAX_STARTUPS" ]; then
+			error "sshd bounds assertion FAILED: effective MaxStartups is '$EFFECTIVE', expected '$HYGIENE_SSHD_MAX_STARTUPS' ($SSH_DROP_IN)"
+			exit 1
+		fi
+		info "sshd bounds verified: sshd -T reports maxstartups $EFFECTIVE (as configured)"
 	fi
 fi
 

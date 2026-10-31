@@ -47,6 +47,14 @@ export HYGIENE_UNATTENDED_UPGRADES="${hygiene_unattended_upgrades}"
 export HYGIENE_DISK_ALERT_PCT="${hygiene_disk_alert_pct}"
 # shellcheck disable=SC2154
 export HYGIENE_DISK_WEBHOOK_URL="${hygiene_disk_webhook_url}"
+# shellcheck disable=SC2154
+export HYGIENE_SSHD_MAX_STARTUPS="${hygiene_sshd_max_startups}"
+# shellcheck disable=SC2154
+export HYGIENE_SSHD_MAX_SESSIONS="${hygiene_sshd_max_sessions}"
+# shellcheck disable=SC2154
+export HYGIENE_SSHD_KEEPALIVE_INTERVAL="${hygiene_sshd_keepalive_interval}"
+# shellcheck disable=SC2154
+export HYGIENE_SSHD_KEEPALIVE_COUNT="${hygiene_sshd_keepalive_count}"
 
-__log "running host-hygiene engine (6 knobs from module variables)"
+__log "running host-hygiene engine (10 knobs from module variables)"
 bash "$HYGIENE_ENGINE"

@@ -111,3 +111,32 @@ variable "disk_alert_webhook_url" {
   type        = string
   default     = ""
 }
+
+variable "sshd_max_startups" {
+  description = "MaxStartups value for the sshd drop-in /etc/ssh/sshd_config.d/09-sshd-limits.conf (start:rate:full, e.g. 40:30:100). Bounds unauthenticated concurrent connections so internet scanners cannot starve CI/SSH. The 09- prefix sorts before (and shadows, sshd keeps the first value) the retired L2 repo's 10-l2.conf (MaxStartups 3:50:10), which dropped 50% of connections at random from the 3rd scanner in — 54 'drop connection ... Maxstartups' events in 6 h and CI flakes with 'kex_exchange_identification: read: Connection reset by peer'. Set to \"0\" to stop managing sshd connection bounds via host hygiene."
+  type        = string
+  default     = "40:30:100"
+
+  validation {
+    condition     = can(regex("^(0|[0-9]+:[0-9]+:[0-9]+)$", var.sshd_max_startups))
+    error_message = "sshd_max_startups must be a MaxStartups triple like \"40:30:100\", or \"0\" to stop managing sshd bounds."
+  }
+}
+
+variable "sshd_max_sessions" {
+  description = "MaxSessions for the sshd drop-in 09-sshd-limits.conf (concurrent sessions per connection)."
+  type        = number
+  default     = 20
+}
+
+variable "sshd_keepalive_interval" {
+  description = "ClientAliveInterval seconds for the sshd drop-in 09-sshd-limits.conf (server keepalive packets; drops dead connections)."
+  type        = number
+  default     = 60
+}
+
+variable "sshd_keepalive_count" {
+  description = "ClientAliveCountMax for the sshd drop-in 09-sshd-limits.conf (unanswered keepalives before disconnect)."
+  type        = number
+  default     = 3
+}
