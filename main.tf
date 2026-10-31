@@ -24,8 +24,9 @@ resource "hcloud_server" "main" {
   # scripts/host-hygiene.sh as substitution values (they stay the single
   # source of truth for their engines) and exports this module's hygiene
   # variables as HYGIENE_* env vars for the engine. Both engines are
-  # idempotent, and user_data is not ForceNew, so changing hygiene knobs or
-  # re-applying never destroys existing servers. Existing VMs can be brought
+  # idempotent. `user_data` IS ForceNew in the hcloud provider (cloud-init
+  # only runs at first boot), so it is in `ignore_changes` below: changing a
+  # hygiene knob must never recreate a live server. Existing VMs are brought
   # up to date with `sudo bash scripts/bootstrap-hygiene.sh --apply` (README).
   user_data = templatefile("${path.module}/scripts/first-boot.sh", {
     git_pin_script                   = file("${path.module}/scripts/git-pin.sh")
@@ -52,12 +53,19 @@ resource "hcloud_server" "main" {
   lifecycle {
     prevent_destroy = true
 
-    # The image attribute is creation-time-only. Servers that were OS-
-    # upgraded in place (do-release-upgrade 22.04 -> 24.04 -> 26.04) keep
-    # their original image slug in the Hetzner API and in state; without
-    # this ignore_changes every plan would show an image "change" (=
-    # destroy/recreate) and prevent_destroy would refuse the deploy.
-    ignore_changes = [image]
+    # Creation-time-only attributes. Servers that were OS-upgraded in place
+    # (do-release-upgrade 22.04 -> 24.04 -> 26.04) keep their original image
+    # slug in the Hetzner API and in state; without this ignore_changes every
+    # plan would show an image "change" (= destroy/recreate) and
+    # prevent_destroy would refuse the deploy.
+    #
+    # `user_data` is ForceNew too: cloud-init runs once, at build time, so any
+    # edit to the embedded engines (or to a hygiene knob) would otherwise plan
+    # a whole-server replacement — every L1 hygiene change would be undeployable
+    # and would trip prevent_destroy exactly like the 2026-10-31 L3 pin bump
+    # did. A live host converges through `scripts/bootstrap-hygiene.sh
+    # --apply`; a rebuilt host picks up the new user_data at creation.
+    ignore_changes = [image, user_data]
   }
 }
 # =============================================================================
