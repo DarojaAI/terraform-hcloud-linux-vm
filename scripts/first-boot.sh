@@ -55,6 +55,8 @@ export HYGIENE_SSHD_MAX_SESSIONS="${hygiene_sshd_max_sessions}"
 export HYGIENE_SSHD_KEEPALIVE_INTERVAL="${hygiene_sshd_keepalive_interval}"
 # shellcheck disable=SC2154
 export HYGIENE_SSHD_KEEPALIVE_COUNT="${hygiene_sshd_keepalive_count}"
+# shellcheck disable=SC2154
+export HYGIENE_SSHD_PERSOURCE_PENALTIES="${hygiene_sshd_persource_penalties}"
 
-__log "running host-hygiene engine (10 knobs from module variables)"
+__log "running host-hygiene engine (11 knobs from module variables)"
 bash "$HYGIENE_ENGINE"

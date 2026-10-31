@@ -123,6 +123,17 @@ variable "sshd_max_startups" {
   }
 }
 
+variable "sshd_persource_penalties" {
+  description = "PerSourcePenalties keyword overrides for the same sshd drop-in 09-sshd-limits.conf (issue #11). OpenSSH 10.2 enables per-source penalties by default; the noauth:1 term makes a CI deploy's short-lived pre-auth SSH/scp connections from one runner IP accrue a penalty (up to max 600s) and get refused with the SAME 'kex_exchange_identification: read: Connection reset by peer' as a MaxStartups drop. The default \"noauth:0\" relaxes only that priming term — a partial override, so every other keyword (crash/authfail/grace-exceeded/refuseconnection/max/min) keeps the distro default. Set to \"\" to leave the distro policy untouched (no line rendered)."
+  type        = string
+  default     = "noauth:0"
+
+  validation {
+    condition     = can(regex("^$|^[a-z0-9-]+:[0-9]+[smhdw]?([[:space:]]+[a-z0-9-]+:[0-9]+[smhdw]?)*$", var.sshd_persource_penalties))
+    error_message = "sshd_persource_penalties must be space-separated PerSourcePenalties keywords with durations in seconds or s/m/h/d/w (e.g. \"noauth:0\" or \"noauth:0 max:120\"), or \"\" to leave the distro default."
+  }
+}
+
 variable "sshd_max_sessions" {
   description = "MaxSessions for the sshd drop-in 09-sshd-limits.conf (concurrent sessions per connection)."
   type        = number

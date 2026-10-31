@@ -142,6 +142,12 @@ fi
 # defaulted here: `0` or an explicitly empty value opts out of sshd
 # management entirely; unset falls back to the module default 40:30:100
 # inside section 5.
+# HYGIENE_SSHD_PERSOURCE_PENALTIES is deliberately NOT defaulted here
+# either: unset falls back to the chosen lever `noauth:0` inside section 5
+# (issue #11 — disables the pre-auth-connection priming term of OpenSSH
+# 10.2's PerSourcePenalties, keeps every other keyword at the distro
+# default); an explicitly EMPTY value leaves the distro policy untouched
+# (no line rendered) and is logged.
 # HYGIENE_DISK_WEBHOOK_URL is optional; empty/absent = webhook off.
 
 # ── Persist a canonical copy for operator re-runs (mirrors git-pin.sh) ──
@@ -478,6 +484,37 @@ fi
 # (every deploy's SSH layer flaked with `kex_exchange_identification: read:
 # Connection reset by peer`).
 #
+# PerSourcePenalties is a SECOND, independent copy of that identical error
+# (DarojaAI/terraform-hcloud-linux-vm #11). OpenSSH 10.2 enables it by
+# default on this box (`sshd -T`):
+#   persourcepenalties crash:90 authfail:5 noauth:1 grace-exceeded:10
+#   refuseconnection:10 max:600 min:15 ...
+# Measured mechanics (10.2p1 source: srclimit.c/sshd.c/servconf.c, matched
+# to host logs): penalties only ACCRUE — each offence extends the source's
+# expiry (existing->expiry += secs) up to max:600 and activation starts past
+# min:15; there is no decay. The noauth:1 term fires in child_reap() for any
+# pre-auth connection that closes without authenticating, so a CI deploy's
+# ~30 SSH/scp connections from one runner IP plus retries accumulate 30s+
+# (> min:15), get refused, and each retry re-extends the window toward the
+# 600s cap. The refusal happens in the SAME drop_connection() path as
+# MaxStartups ("Not allowed at this time\r\n", no banner) — byte-identical
+# client error, invisible to the old MaxStartups-only observability. Host
+# logs confirm real activations: 127.0.0.1 authfail 20s + drop bursts, and
+# scanners penalized for exceeded LoginGraceTime (16-20s) — so the crash/
+# authfail/grace-exceeded protections are doing useful work and stay on.
+#
+# Lever choice (see issue-shaped discussion above): disabling the whole
+# feature (`no`) or exempting CI egress ranges (PerSourcePenaltyExemptList)
+# would shed real scanner protection or bake dynamic runner IPs into a
+# generic module; capping `max` only shortens the outage while retries keep
+# re-extending to the cap. The surgical lever is RELAXING ONLY the priming
+# term to `noauth:0` (a partial override — unspecified keywords keep their
+# distro defaults): pre-auth connection bursts no longer accrue, while
+# crash/authfail/grace-exceeded/refuseconnection/min/max stay exactly as
+# measured above. sshd_config(5) itself warns noauth "should be used
+# cautiously otherwise it may penalise legitimate scanning tools such as
+# ssh-keyscan(1)".
+#
 # Legacy migration (explicit, evidence-preserving; installs only — nothing
 # is deleted): a `10-l2.conf` that still carries `MaxStartups 3:50:10` is
 # renamed in place to `10-l2.conf.disabled-<UTC ts>`. Any other content is
@@ -486,20 +523,90 @@ fi
 # Renders the drop-in from the configured knobs. Pure function (stdout) so
 # tests/sshd-limits.bats can render it into a temp dir hermetically without
 # running the engine against the real /etc/ssh.
+# PerSourcePenalties overrides (issue #11) render only when the knob is
+# non-empty; `noauth:0` disables the pre-auth-connection priming term while
+# every other keyword keeps its distro default (partial override).
 sshd_limits_dropin() {
 	cat <<-EOF
 	# sshd connection bounds - L1 host hygiene (scripts/host-hygiene.sh section 5).
-	# Hardens the SSH surface against connection-exhaustion flakes (issue #9).
+	# Hardens the SSH surface against connection-exhaustion flakes (issues #9 + #11).
 	# This file sorts BEFORE the retired L2 repo's 10-l2.conf (MaxStartups
 	# 3:50:10): sshd Include sits at the top of sshd_config and sshd keeps the
 	# FIRST value it reads, so 09- wins. Evidence: 54 'drop connection ...
-	# Maxstartups' events in 6 h on the test VM; CI runners failed with
-	# 'kex_exchange_identification: read: Connection reset by peer'.
+	# Maxstartups' events in 6 h on the test VM. PerSourcePenalties (enabled
+	# by default in OpenSSH 10.2) has the SAME client-visible failure mode —
+	# drop_connection() refuses with 'Not allowed at this time' before any
+	# banner, hence the identical 'kex_exchange_identification: read:
+	# Connection reset by peer' — see issue #11; the noauth term here is
+	# 0 so benign pre-auth bursts from CI runner IPs cannot accrue a penalty.
 	MaxStartups $HYGIENE_SSHD_MAX_STARTUPS
 	MaxSessions $HYGIENE_SSHD_MAX_SESSIONS
 	ClientAliveInterval $HYGIENE_SSHD_KEEPALIVE_INTERVAL
 	ClientAliveCountMax $HYGIENE_SSHD_KEEPALIVE_COUNT
 	EOF
+	# Unset means the module default (noauth:0); an explicitly EMPTY value
+	# means "leave the distro policy alone" and renders no line at all. The
+	# default lives here, not only in the main flow, so the render (and the
+	# --check comparison built from it) is a pure function of the env.
+	psp_directive="${HYGIENE_SSHD_PERSOURCE_PENALTIES-noauth:0}"
+	if [ -n "$psp_directive" ]; then
+		printf 'PerSourcePenalties %s\n' "$psp_directive"
+	fi
+}
+
+# ── PerSourcePenalties effective-value assertion helpers (pure; subject to
+#    the same hermetic tests as sshd_limits_dropin) ──
+# sshd -T prints the FULL effective persourcepenalties policy line with
+# durations normalized to seconds (e.g. `noauth:90s` -> `noauth:90`), so the
+# post-reload assert compares term-by-term: every `key:value` we configured
+# must appear in the effective tuple as `key:<convtime(value)>`.
+# psp_term_seconds mirrors sshd's convtime(3): digits with an optional
+# s/m/h/d/w suffix (compound allowed — 1m30s == 90s).
+psp_term_seconds() {
+	local val=$1 total=0 digits mult rest
+	val=${val,,}
+	while [ -n "$val" ]; do
+		digits=${val%%[a-z]*}
+		rest=${val#"$digits"}
+		if [ -z "$digits" ]; then
+			echo -1
+			return 1
+		fi
+		mult=1
+		case ${rest:0:1} in
+			"") rest="" ;;
+			s) mult=1 ;;
+			m) mult=60 ;;
+			h) mult=3600 ;;
+			d) mult=86400 ;;
+			w) mult=604800 ;;
+			*) echo -1; return 1 ;;
+		esac
+		total=$(( total + digits * mult ))
+		val=${rest:1}
+	done
+	echo "$total"
+}
+
+# Usage: psp_tuple_matches CONFIG "effective tuple"; returns 0 when every
+# configured term is honored in sshd's effective policy.
+psp_tuple_matches() {
+	local expected=$1 effective=$2 term key want got eff
+	for term in $expected; do
+		key=${term%%:*}
+		key=${key,,}
+		want=$(psp_term_seconds "${term#*:}") || return 1
+		got=""
+		for eff in $effective; do
+			case $eff in
+				"$key:"*) got=${eff#*:}; break ;;
+			esac
+		done
+		if [ -z "$got" ] || [ "$got" != "$want" ]; then
+			return 1
+		fi
+	done
+	return 0
 }
 
 SSHD_CONFIG_D=/etc/ssh/sshd_config.d
@@ -519,10 +626,26 @@ if [ "$SSHD_MANAGE" = 0 ]; then
 	warn "sshd bounds: skipped — HYGIENE_SSHD_MAX_STARTUPS is 0/empty (sshd not managed)"
 else
 	: "${HYGIENE_SSHD_MAX_STARTUPS:=40:30:100}"
+	# PerSourcePenalties knob (issue #11): unset -> the chosen lever noauth:0
+	# (partial override; other keywords keep distro defaults); explicitly
+	# empty -> leave the distro policy untouched and log it.
+	if [ -z "${HYGIENE_SSHD_PERSOURCE_PENALTIES+x}" ]; then
+		HYGIENE_SSHD_PERSOURCE_PENALTIES=noauth:0
+	fi
 	info "sshd bounds: max_startups=$HYGIENE_SSHD_MAX_STARTUPS max_sessions=$HYGIENE_SSHD_MAX_SESSIONS keepalive=${HYGIENE_SSHD_KEEPALIVE_INTERVAL}s x${HYGIENE_SSHD_KEEPALIVE_COUNT} -> $SSH_DROP_IN"
+	if [ -n "$HYGIENE_SSHD_PERSOURCE_PENALTIES" ]; then
+		info "sshd bounds: per_source_penalties=$HYGIENE_SSHD_PERSOURCE_PENALTIES (will assert it in 'sshd -T' after reload)"
+	else
+		info "sshd bounds: per_source_penalties left at the distro default (HYGIENE_SSHD_PERSOURCE_PENALTIES is empty — no line rendered)"
+	fi
 
 	if [ -n "$HYGIENE_DRY_RUN" ]; then
 		info "DRY RUN: would write $SSH_DROP_IN (mode 0644)"
+		if [ -n "$HYGIENE_SSHD_PERSOURCE_PENALTIES" ]; then
+			info "DRY RUN: would render 'PerSourcePenalties $HYGIENE_SSHD_PERSOURCE_PENALTIES' and assert it in 'sshd -T | grep -i persourcepenalties'"
+		else
+			info "DRY RUN: PerSourcePenalties left at the distro default (knob empty — no line in $SSH_DROP_IN)"
+		fi
 		if [ -f "$LEGACY_DROP_IN" ] && grep -qi '^[[:space:]]*maxstartups[[:space:]]*3:50:10' "$LEGACY_DROP_IN"; then
 			warn "DRY RUN: would rename $LEGACY_DROP_IN to $LEGACY_DROP_IN.disabled-$(date -u +%Y%m%dT%H%M%SZ) (still sets MaxStartups 3:50:10 from the retired L2 repo — would shadow this 09- drop-in)"
 		fi
@@ -557,6 +680,26 @@ else
 				exit 1
 			fi
 			info "sshd bounds verified: sshd -T reports maxstartups $EFFECTIVE (as configured)"
+		fi
+		# Effective-policy assertions run only in apply mode: --check must not
+		# touch sshd at all (no reload, no -T probe against the live daemon).
+		if [ "$MODE" = apply ]; then
+			# PerSourcePenalties (issue #11). sshd -T prints the WHOLE effective
+			# policy line with durations normalized to seconds (noauth:90s becomes
+			# noauth:90), so a plain string compare is wrong twice: the printed
+			# tuple always shows every keyword, and unit-form durations are
+			# canonicalized. Assert instead that every configured keyword is
+			# honored in the effective tuple.
+			if [ -n "$HYGIENE_SSHD_PERSOURCE_PENALTIES" ]; then
+				EFFECTIVE_PSP=$(sshd -T | sed -nE 's/^persourcepenalties[[:space:]]+//ip')
+				if [ -z "$EFFECTIVE_PSP" ] || ! psp_tuple_matches "$HYGIENE_SSHD_PERSOURCE_PENALTIES" "$EFFECTIVE_PSP"; then
+					error "sshd bounds assertion FAILED: sshd -T reports PerSourcePenalties as '${EFFECTIVE_PSP:-<no persourcepenalties line>}', configured '$HYGIENE_SSHD_PERSOURCE_PENALTIES' not honored ($SSH_DROP_IN)"
+					exit 1
+				fi
+				info "sshd bounds verified: sshd -T reports PerSourcePenalties honoring '$HYGIENE_SSHD_PERSOURCE_PENALTIES'"
+			else
+				info "sshd bounds: PerSourcePenalties left at the distro default — effective (sshd -T): $(sshd -T | sed -nE 's/^persourcepenalties[[:space:]]+//ip')"
+			fi
 		fi
 	fi
 fi

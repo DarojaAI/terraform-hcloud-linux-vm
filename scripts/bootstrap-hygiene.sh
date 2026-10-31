@@ -25,6 +25,10 @@
 #   HYGIENE_SSHD_MAX_SESSIONS     sshd MaxSessions (default 20)
 #   HYGIENE_SSHD_KEEPALIVE_INTERVAL  sshd ClientAliveInterval seconds (default 60)
 #   HYGIENE_SSHD_KEEPALIVE_COUNT  sshd ClientAliveCountMax (default 3)
+#   HYGIENE_SSHD_PERSOURCE_PENALTIES  PerSourcePenalties keyword overrides (default noauth:0,
+#                                 issue #11 — disables the pre-auth-connection priming term,
+#                                 keeps other keywords at distro defaults); empty = leave the
+#                                 distro policy untouched (no line rendered)
 set -euo pipefail
 
 usage() {
@@ -43,6 +47,7 @@ Usage: sudo bash scripts/bootstrap-hygiene.sh [--apply|--check]
     HYGIENE_DISK_ALERT_PCT=85 HYGIENE_DISK_WEBHOOK_URL=https://...
     HYGIENE_SSHD_MAX_STARTUPS=40:30:100 HYGIENE_SSHD_MAX_SESSIONS=20
     HYGIENE_SSHD_KEEPALIVE_INTERVAL=60 HYGIENE_SSHD_KEEPALIVE_COUNT=3
+    HYGIENE_SSHD_PERSOURCE_PENALTIES=noauth:0  (empty = distro default)
 EOF
 }
 
