@@ -34,6 +34,7 @@ resource "hcloud_server" "main" {
     hygiene_journald_max_use         = var.journald_max_use
     hygiene_docker_prune             = tostring(var.enable_docker_prune)
     hygiene_docker_prune_until       = var.docker_prune_until
+    hygiene_packages                 = join(" ", var.hygiene_packages)
     hygiene_unattended_upgrades      = tostring(var.enable_unattended_upgrades)
     hygiene_disk_alert_pct           = tostring(var.disk_alert_pct)
     hygiene_disk_webhook_url         = var.disk_alert_webhook_url

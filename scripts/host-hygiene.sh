@@ -139,6 +139,7 @@ fi
 # ── Configuration (HYGIENE_* env overrides; defaults match module vars) ──
 : "${HYGIENE_JOURNALD_MAX_USE:=1G}"
 : "${HYGIENE_DOCKER_PRUNE:=true}"
+: "${HYGIENE_PACKAGES:=}"
 : "${HYGIENE_DOCKER_PRUNE_UNTIL:=168h}"
 : "${HYGIENE_UNATTENDED_UPGRADES:=true}"
 : "${HYGIENE_DISK_ALERT_PCT:=85}"
@@ -419,6 +420,23 @@ else
 			info "docker-prune timer installed and enabled (until=$HYGIENE_DOCKER_PRUNE_UNTIL)"
 		fi
 	fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
+# 2b. workload packages — generic mechanism, workload-owned list
+# ═══════════════════════════════════════════════════════════════════════
+# L1 stays workload-agnostic: this engine installs whatever HYGIENE_PACKAGES
+# names (space-separated) and installs nothing when the list is empty. The
+# workload supplies the values (linux-desktop-seed passes "podman" because its
+# Route C supervision/identity contract reads image identity with
+# `podman image inspect` — a runtime the VM itself must carry, not something a
+# deploy installs per run).
+info "workload packages: '${HYGIENE_PACKAGES:-<none>}'"
+if [ "$MODE" != check ]; then
+	read -r -a HYGIENE_PKG_LIST <<< "${HYGIENE_PACKAGES:-}"
+	for pkg in "${HYGIENE_PKG_LIST[@]:-}"; do
+		apt_install "$pkg"
+	done
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

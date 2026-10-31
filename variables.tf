@@ -174,3 +174,9 @@ variable "sysctl_forwarding" {
   type        = bool
   default     = true
 }
+
+variable "hygiene_packages" {
+  description = "Workload packages the VM itself must carry, installed by the hygiene engine at first boot and on every `--apply`. A generic mechanism: L1 stays workload-agnostic and installs nothing when the list is empty; the workload supplies the values (linux-desktop-seed passes [\"podman\"] because its Route C supervision/identity contract reads image identity with `podman image inspect`). Existing VMs converge with `sudo bash /opt/first-boot.sh`."
+  type        = list(string)
+  default     = []
+}
