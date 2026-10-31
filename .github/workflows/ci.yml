@@ -1,0 +1,61 @@
+name: CI
+
+# L1 module CI (2026-10-31): before this file the only workflow was
+# semantic-release on main, so every PR (including the sshd-limits change
+# that retires the L2 drop-in) merged with zero automated checks.
+#
+# Terraform is delegated to the org reusable (single source of truth for
+# fmt/validate/security); the provisioning shell + bats suite are small
+# enough to run inline.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    name: Terraform fmt / validate / security
+    uses: DarojaAI/infra-actions/.github/workflows/reusable-terraform-validate.yml@main
+    with:
+      terraform-version: '1.7.5'
+      # This module's .tf files live at the repo root, not in terraform/.
+      terraform-dir: '.'
+      # State lives with the consumer (linux-desktop-seed passes its own
+      # backend per environment); this repo has no backend block to check.
+      check-remote-state: false
+      scan-security-enabled: true
+      scan-security-frameworks: 'checkov'
+      scan-security-severity-threshold: 'MEDIUM'
+
+  provisioning-shell:
+    name: Provisioning scripts (shellcheck + bats)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install shellcheck and bats
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck bats
+
+      - name: shellcheck (provisioning scripts)
+        run: |
+          set -euo pipefail
+          shellcheck -x scripts/*.sh
+
+      - name: bats (provisioning suites)
+        run: |
+          set -euo pipefail
+          # Hermetic by design: every suite renders into a temp dir and stubs
+          # sshd/systemctl on PATH — nothing here touches a real host.
+          bats --print-output-on-failure tests/
