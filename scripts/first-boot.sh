@@ -58,5 +58,22 @@ export HYGIENE_SSHD_KEEPALIVE_COUNT="${hygiene_sshd_keepalive_count}"
 # shellcheck disable=SC2154
 export HYGIENE_SSHD_PERSOURCE_PENALTIES="${hygiene_sshd_persource_penalties}"
 
-__log "running host-hygiene engine (11 knobs from module variables)"
+# shellcheck disable=SC2154
+export HYGIENE_FAIL2BAN_IGNOREIP="${hygiene_fail2ban_ignoreip}"
+# shellcheck disable=SC2154
+export HYGIENE_FAIL2BAN_REFRESH="${hygiene_fail2ban_refresh}"
+
+# ── 2b. fail2ban ignoreip static fallback data (GitHub Actions ranges) ──
+# Data only. host-hygiene.sh section 6 reads this when the live
+# api.github.com/meta fetch is unreachable at install/refresh time, so a
+# network fault can never strip the sshd jail of its exemptions.
+F2B_FALLBACK=/opt/github-actions-cidrs.txt
+cat > "$F2B_FALLBACK.tmp" <<'F2B_FALLBACK_EMBEDDED_EOF'
+${fail2ban_cidrs_file}
+F2B_FALLBACK_EMBEDDED_EOF
+chmod 0644 "$F2B_FALLBACK.tmp"
+mv -f "$F2B_FALLBACK.tmp" "$F2B_FALLBACK"
+__log "deployed fail2ban ignoreip static fallback data ($F2B_FALLBACK)"
+
+__log "running host-hygiene engine (13 knobs from module variables)"
 bash "$HYGIENE_ENGINE"
