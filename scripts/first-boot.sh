@@ -58,6 +58,7 @@ export HYGIENE_SSHD_KEEPALIVE_COUNT="${hygiene_sshd_keepalive_count}"
 # shellcheck disable=SC2154
 export HYGIENE_SSHD_PERSOURCE_PENALTIES="${hygiene_sshd_persource_penalties}"
 
+# shellcheck disable=SC2154
 export HYGIENE_FAIL2BAN_IGNOREIP="${hygiene_fail2ban_ignoreip}"
 # shellcheck disable=SC2154
 export HYGIENE_FAIL2BAN_REFRESH="${hygiene_fail2ban_refresh}"
