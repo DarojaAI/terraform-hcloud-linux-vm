@@ -10,6 +10,7 @@
 #   5. sshd connection bounds  — /etc/ssh/sshd_config.d/09-sshd-limits.conf
 #   6. fail2ban sshd ignoreip  — /etc/fail2ban/jail.d/10-lds-ignoreip.conf
 #      (GitHub Actions runner ranges + weekly refresh unit)
+#   6. sysctl forwarding       — /etc/sysctl.d/90-host-hygiene-forwarding.conf
 #
 # Deliberately NOT here (layering): workload-specific retention (capture
 # pruner, disk-warden, growth report) lives in linux-desktop-seed at user
@@ -30,14 +31,16 @@
 #                         0 = clean; 1 = drift (one line per artifact +
 #                       summary count); 2 = cannot evaluate (unreadable live
 #                       file or a render failed). Never mutates anything,
-#                       never reloads, never calls systemctl/sshd/apt.
+#                       never reloads, never calls systemctl/sshd/apt/sysctl.
 #
 # Configuration comes from HYGIENE_* environment variables with the module's
 # defaults below, so the engine is valid standalone. Idempotent: safe to
 # re-run any time. Installs only — never deletes anything by hand.
 set -eo pipefail
 
-SELF_COPY=/opt/host-hygiene.sh
+# HYGIENE_ROOT also redirects the canonical self-copy, so a hermetic apply
+# test under a fixture root never writes the real /opt (prod: unset → /opt).
+SELF_COPY="${HYGIENE_ROOT:-}/opt/host-hygiene.sh"
 
 # ── Minimal helpers (self-contained — L1 module owns this, no lib.sh) ──
 __log() { echo "[$(date -Iseconds)] [$1] $2"; }
@@ -56,11 +59,13 @@ Usage: bash scripts/host-hygiene.sh [--check]
                          0 = clean; 1 = drift (one line per artifact plus a
                        summary count); 2 = cannot evaluate (unreadable live
                        file, or a render failed). Never mutates, never reloads,
-                       never calls systemctl/sshd/apt.
+                       never calls systemctl/sshd/apt/sysctl.
   HYGIENE_DRY_RUN=1   : print what would change without touching anything.
 
-  HYGIENE_ROOT (optional) overrides the live filesystem root for --check,
-  so hermetic tests can compare against a fixture tree.
+  HYGIENE_ROOT (optional, test seam) overrides the live filesystem root for
+  BOTH the --check comparison and the apply writes (incl. the canonical
+  self-copy), so hermetic tests can run the full apply path against a
+  fixture tree. Production: unset = real /.
 EOF
 }
 
@@ -151,6 +156,12 @@ fi
 # default); an explicitly EMPTY value leaves the distro policy untouched
 # (no line rendered) and is logged.
 # HYGIENE_DISK_WEBHOOK_URL is optional; empty/absent = webhook off.
+: "${HYGIENE_SYSCTL_FORWARDING:=true}"
+
+# Test seam: every live-filesystem write below goes through LIVE_ROOT (the
+# same HYGIENE_ROOT --check compares against), so a hermetic apply run under
+# a fixture tree never touches the real filesystem. Production: unset "".
+LIVE_ROOT="${HYGIENE_ROOT:-}"
 
 # ── Persist a canonical copy for operator re-runs (mirrors git-pin.sh) ──
 # Never in --check mode: a check must not write anything anywhere.
@@ -348,10 +359,11 @@ hygiene_install() {
 		mv -f "$dest.tmp" "$dest"
 		return 0
 	fi
-	mkdir -p "$(dirname "$path")"
-	"$fn" > "$path.tmp"
-	[ "$mode" = "-" ] || chmod "$mode" "$path.tmp"
-	mv -f "$path.tmp" "$path"
+	local dest="$LIVE_ROOT$path"
+	mkdir -p "$(dirname "$dest")"
+	"$fn" > "$dest.tmp"
+	[ "$mode" = "-" ] || chmod "$mode" "$dest.tmp"
+	mv -f "$dest.tmp" "$dest"
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -389,7 +401,7 @@ if [ -z "$DOCKER_BIN" ]; then
 	warn "docker not installed — docker-prune timer skipped (nothing to prune)"
 elif [ "$HYGIENE_DOCKER_PRUNE" != "true" ]; then
 	warn "docker-prune disabled by HYGIENE_DOCKER_PRUNE=$HYGIENE_DOCKER_PRUNE — skipping"
-	if [ "$MODE" = apply ] && is_systemd && [ -f /etc/systemd/system/docker-prune.timer ]; then
+	if [ "$MODE" = apply ] && is_systemd && [ -f "$LIVE_ROOT/etc/systemd/system/docker-prune.timer" ]; then
 		systemctl_apply disable --now docker-prune.timer 2>/dev/null || true
 		info "docker-prune timer disabled (unit files left in place; re-enable: HYGIENE_DOCKER_PRUNE=true re-run)"
 	fi
@@ -426,7 +438,7 @@ else
 		if [ -n "$HYGIENE_DRY_RUN" ]; then
 			info "DRY RUN: would write $AUTO_CONF and $UNATT_CONF (security-only origins, no auto-reboot)"
 		else
-			mkdir -p /etc/apt/apt.conf.d
+			mkdir -p "$LIVE_ROOT/etc/apt/apt.conf.d"
 			hygiene_install "$AUTO_CONF" render_apt_auto_upgrades 0644
 			hygiene_install "$UNATT_CONF" render_apt_unattended 0644
 			info "unattended-upgrades configured: security-only origins, no auto-reboot ($AUTO_CONF, $UNATT_CONF)"
@@ -443,7 +455,7 @@ fi
 info "disk-watch: threshold=${HYGIENE_DISK_ALERT_PCT}% webhook=$([ -n "$HYGIENE_DISK_WEBHOOK_URL" ] && echo on || echo off)"
 if [ "$HYGIENE_DISK_ALERT_PCT" = "0" ]; then
 	warn "disk-watch alarm disabled by HYGIENE_DISK_ALERT_PCT=0 — skipping"
-	if [ "$MODE" = apply ] && is_systemd && [ -f /etc/systemd/system/disk-watch.timer ]; then
+	if [ "$MODE" = apply ] && is_systemd && [ -f "$LIVE_ROOT/etc/systemd/system/disk-watch.timer" ]; then
 		systemctl_apply disable --now disk-watch.timer 2>/dev/null || true
 		info "disk-watch timer disabled (unit files left in place)"
 	fi
@@ -468,7 +480,7 @@ else
 	elif [ -n "$HYGIENE_DRY_RUN" ]; then
 		info "DRY RUN: would install env file, disk-watch watchdog + weekly timer (threshold ${HYGIENE_DISK_ALERT_PCT}%)"
 	else
-		mkdir -p /usr/local/bin /etc/systemd/system
+		mkdir -p "$LIVE_ROOT/usr/local/bin" "$LIVE_ROOT/etc/systemd/system"
 		umask 077
 		hygiene_install "$ENV_FILE" render_host_hygiene_env 0600
 		hygiene_install "$WATCH" render_disk_watch_script 0755
@@ -666,15 +678,15 @@ else
 			# Explicit idempotent mode re-assert on the live file: the generic
 			# installer already chmods the staged copy, this also repairs a
 			# drifted/foreign-mode drop-in that may pre-date this engine.
-			chmod 0644 "$SSH_DROP_IN"
+			chmod 0644 "$LIVE_ROOT$SSH_DROP_IN"
 			info "sshd bounds written: MaxStartups=$HYGIENE_SSHD_MAX_STARTUPS MaxSessions=$HYGIENE_SSHD_MAX_SESSIONS keepalive=${HYGIENE_SSHD_KEEPALIVE_INTERVAL}s x${HYGIENE_SSHD_KEEPALIVE_COUNT} ($SSH_DROP_IN, mode 0644)"
 
 			# Legacy migration: rename (never delete) any 10-l2.conf that still
 			# sets the retired L2 repo's MaxStartups 3:50:10, so it can no longer
 			# shadow this drop-in. Any other content is left untouched.
-			if [ -f "$LEGACY_DROP_IN" ] && grep -qi '^[[:space:]]*maxstartups[[:space:]]*3:50:10' "$LEGACY_DROP_IN"; then
-				LEGACY_RENAMED="$LEGACY_DROP_IN.disabled-$(date -u +%Y%m%dT%H%M%SZ)"
-				mv -f "$LEGACY_DROP_IN" "$LEGACY_RENAMED"
+			if [ -f "$LIVE_ROOT$LEGACY_DROP_IN" ] && grep -qi '^[[:space:]]*maxstartups[[:space:]]*3:50:10' "$LIVE_ROOT$LEGACY_DROP_IN"; then
+				LEGACY_RENAMED="$LIVE_ROOT$LEGACY_DROP_IN.disabled-$(date -u +%Y%m%dT%H%M%SZ)"
+				mv -f "$LIVE_ROOT$LEGACY_DROP_IN" "$LEGACY_RENAMED"
 				warn "renamed $LEGACY_DROP_IN -> $LEGACY_RENAMED (sets MaxStartups 3:50:10 from the retired L2 repo; the L1 09- drop-in now owns sshd bounds)"
 			fi
 
@@ -942,23 +954,24 @@ fail2ban_ignoreip_reload() {
 # (never in --check, which reads it back read-only), so the cache is
 # truthful by construction: it is exactly what the last apply resolved.
 fail2ban_ignoreip_apply() {
-	local ranges
+	local ranges root
+	root="${LIVE_ROOT:-}"
 	ranges=$(fail2ban_github_actions) || return 2
-	mkdir -p "$(dirname "$FAIL2BAN_CACHE")"
-	printf '%s\n' "${ranges// /$'\n'}" > "$FAIL2BAN_CACHE.tmp"
-	mv -f "$FAIL2BAN_CACHE.tmp" "$FAIL2BAN_CACHE"
+	mkdir -p "$(dirname "$root$FAIL2BAN_CACHE")"
+	printf '%s\n' "${ranges// /$'\n'}" > "$root$FAIL2BAN_CACHE.tmp"
+	mv -f "$root$FAIL2BAN_CACHE.tmp" "$root$FAIL2BAN_CACHE"
 	FAIL2BAN_CIDRS=$ranges
-	mkdir -p "$FAIL2BAN_JAIL_D"
-	if ! fail2ban_ignoreip_dropin > "$FAIL2BAN_DROP_IN.tmp"; then
-		rm -f "$FAIL2BAN_DROP_IN.tmp"
+	mkdir -p "$root$FAIL2BAN_JAIL_D"
+	if ! fail2ban_ignoreip_dropin > "$root$FAIL2BAN_DROP_IN.tmp"; then
+		rm -f "$root$FAIL2BAN_DROP_IN.tmp"
 		return 2
 	fi
-	chmod 0644 "$FAIL2BAN_DROP_IN.tmp"
-	if cmp -s "$FAIL2BAN_DROP_IN.tmp" "$FAIL2BAN_DROP_IN"; then
-		rm -f "$FAIL2BAN_DROP_IN.tmp"
+	chmod 0644 "$root$FAIL2BAN_DROP_IN.tmp"
+	if cmp -s "$root$FAIL2BAN_DROP_IN.tmp" "$root$FAIL2BAN_DROP_IN"; then
+		rm -f "$root$FAIL2BAN_DROP_IN.tmp"
 		fail2ban_ignoreip_reload unchanged
 	else
-		mv -f "$FAIL2BAN_DROP_IN.tmp" "$FAIL2BAN_DROP_IN"
+		mv -f "$root$FAIL2BAN_DROP_IN.tmp" "$root$FAIL2BAN_DROP_IN"
 		info "fail2ban-ignoreip: wrote $FAIL2BAN_DROP_IN (mode 0644)"
 		fail2ban_ignoreip_reload changed
 	fi
@@ -1122,7 +1135,7 @@ else
 	fi
 	if [ "$HYGIENE_FAIL2BAN_REFRESH" != "true" ]; then
 		warn "fail2ban-ignoreip refresh: skipped (HYGIENE_FAIL2BAN_REFRESH=$HYGIENE_FAIL2BAN_REFRESH) — no weekly range re-resolution"
-		if is_systemd && [ -f /etc/systemd/system/fail2ban-ignoreip-refresh.timer ]; then
+		if is_systemd && [ -f "$LIVE_ROOT/etc/systemd/system/fail2ban-ignoreip-refresh.timer" ]; then
 			systemctl_apply disable --now fail2ban-ignoreip-refresh.timer 2>/dev/null || true
 			info "fail2ban-ignoreip refresh timer disabled (unit files left in place; re-enable: HYGIENE_FAIL2BAN_REFRESH=true re-run)"
 		fi
@@ -1132,15 +1145,15 @@ else
 		# Generate the weekly refresh helper from THIS file's own functions
 		# (single implementation: the helper embeds the fail2ban_*
 		# functions verbatim, so it can never drift from the engine).
-		mkdir -p /usr/local/bin /etc/systemd/system
-		render_fail2ban_ignoreip_refresh_script > "$FAIL2BAN_REFRESH_SCRIPT.tmp"
-		chmod 0755 "$FAIL2BAN_REFRESH_SCRIPT.tmp"
-		bash -n "$FAIL2BAN_REFRESH_SCRIPT.tmp" || {
-			rm -f "$FAIL2BAN_REFRESH_SCRIPT.tmp"
+		mkdir -p "$LIVE_ROOT/usr/local/bin" "$LIVE_ROOT/etc/systemd/system"
+		render_fail2ban_ignoreip_refresh_script > "$LIVE_ROOT$FAIL2BAN_REFRESH_SCRIPT.tmp"
+		chmod 0755 "$LIVE_ROOT$FAIL2BAN_REFRESH_SCRIPT.tmp"
+		bash -n "$LIVE_ROOT$FAIL2BAN_REFRESH_SCRIPT.tmp" || {
+			rm -f "$LIVE_ROOT$FAIL2BAN_REFRESH_SCRIPT.tmp"
 			error "generated $FAIL2BAN_REFRESH_SCRIPT failed bash -n — aborting"
 			exit 1
 		}
-		mv -f "$FAIL2BAN_REFRESH_SCRIPT.tmp" "$FAIL2BAN_REFRESH_SCRIPT"
+		mv -f "$LIVE_ROOT$FAIL2BAN_REFRESH_SCRIPT.tmp" "$LIVE_ROOT$FAIL2BAN_REFRESH_SCRIPT"
 		info "fail2ban-ignoreip refresh helper written: $FAIL2BAN_REFRESH_SCRIPT"
 
 		hygiene_install "$FAIL2BAN_REFRESH_SERVICE" render_fail2ban_refresh_service 0644
@@ -1152,6 +1165,63 @@ else
 fi
 
 
+# 6. sysctl forwarding (var-gated; false = do not manage)
+# ═══════════════════════════════════════════════════════════════════════
+# Writes /etc/sysctl.d/90-host-hygiene-forwarding.conf setting IPv4 + IPv6
+# packet forwarding on. Closes the writer gap recorded in linux-desktop-seed
+# docs/architecture/host-provisioning.md (§8.3): the L3 gate
+# verify-vm-state.sh check 6 asserts `sysctl -n net.ipv4.ip_forward == 1`
+# and `net.ipv6.conf.all.forwarding == 1`, but nothing in either repo wrote
+# those keys — the assert passed only because something outside both repos
+# set them. The keys below match the gate EXACTLY; the drop-in sorts under
+# /etc/sysctl.d/ and is applied with `sysctl --system`, then the EFFECTIVE
+# values are asserted from /proc/sys (a drop-in file can exist yet be
+# shadowed by a later-sorting sysctl.d file, so the file alone proves
+# nothing — same shape as the sshd MaxStartups assertion).
+
+# Renders the drop-in. Pure function (stdout) so tests/sysctl-forwarding.bats
+# can extract it hermetically without running the engine.
+render_sysctl_forwarding() {
+	cat <<'EOF'
+# IPv4/IPv6 packet forwarding — L1 host hygiene (scripts/host-hygiene.sh section 6).
+# Asserted by linux-desktop-seed verify-vm-state.sh check 6
+# (net.ipv4.ip_forward=1, net.ipv6.conf.all.forwarding=1).
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+}
+
+SYSCTL_DROP_IN=/etc/sysctl.d/90-host-hygiene-forwarding.conf
+# Test seam: HYGIENE_PROC_ROOT overrides the procfs root the effective-value
+# assertion reads (default: real /proc → $PROC_ROOT/proc/sys/...).
+PROC_ROOT="${HYGIENE_PROC_ROOT:-/}"
+
+info "sysctl forwarding: gate=$HYGIENE_SYSCTL_FORWARDING"
+if [ "$HYGIENE_SYSCTL_FORWARDING" != "true" ]; then
+	warn "sysctl forwarding disabled — skipping (previously written drop-in stays active)"
+else
+	if [ -n "$HYGIENE_DRY_RUN" ]; then
+		info "DRY RUN: would write $SYSCTL_DROP_IN (mode 0644) and run: sysctl --system; then assert effective net.ipv4.ip_forward + net.ipv6.conf.all.forwarding == 1"
+	else
+		hygiene_install "$SYSCTL_DROP_IN" render_sysctl_forwarding 0644
+		if [ "$MODE" = apply ]; then
+			info "sysctl forwarding written: net.ipv4.ip_forward=1, net.ipv6.conf.all.forwarding=1 ($SYSCTL_DROP_IN, mode 0644)"
+
+			# Fail loud, restore nothing silently: apply the drop-in, then
+			# assert the effective values the kernel actually holds.
+			sysctl --system
+			EFFECTIVE_IPV4=$(cat "$PROC_ROOT/proc/sys/net/ipv4/ip_forward" 2>/dev/null || true)
+			EFFECTIVE_IPV6=$(cat "$PROC_ROOT/proc/sys/net/ipv6/conf/all/forwarding" 2>/dev/null || true)
+			if [ "$EFFECTIVE_IPV4" != "1" ] || [ "$EFFECTIVE_IPV6" != "1" ]; then
+				error "sysctl forwarding assertion FAILED: effective net.ipv4.ip_forward='$EFFECTIVE_IPV4', net.ipv6.conf.all.forwarding='$EFFECTIVE_IPV6'; expected both '1' ($SYSCTL_DROP_IN)"
+				exit 1
+			fi
+			info "sysctl forwarding verified: net.ipv4.ip_forward=$EFFECTIVE_IPV4, net.ipv6.conf.all.forwarding=$EFFECTIVE_IPV6 (as configured)"
+		fi
+	fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════
 # Check report (--check mode only)
 # ═══════════════════════════════════════════════════════════════════════
 # Prints one line per compared artifact plus a summary count, then exits:

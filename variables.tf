@@ -164,7 +164,13 @@ variable "fail2ban_ignoreip" {
 }
 
 variable "fail2ban_refresh" {
-  description = "Install and enable the weekly fail2ban-ignoreip-refresh systemd timer: re-resolves the GitHub Actions runner ranges from api.github.com/meta and reloads fail2ban ONLY when the rendered ignoreip drop-in changed (GitHub changes these ranges over time). false = still manage the ignoreip drop-in but skip the refresh unit."
+  description = "Install and enable the weekly fail2ban-ignoreip-refresh systemd timer: re-resolves the GitHub Actions runner ranges from api.github.com/meta and reloads fail2ban ONLY when the rendered ignoreip drop-in changed. false = still manage the ignoreip drop-in but skip the refresh unit."
+  type        = bool
+  default     = true
+}
+
+variable "sysctl_forwarding" {
+  description = "Write /etc/sysctl.d/90-host-hygiene-forwarding.conf enabling IPv4 + IPv6 packet forwarding (net.ipv4.ip_forward=1, net.ipv6.conf.all.forwarding=1), apply it with `sysctl --system`, and assert the effective values from /proc/sys. Closes the writer gap for linux-desktop-seed verify-vm-state.sh check 6, which asserts exactly these two keys; until this drop-in existed the assert passed only because something outside both repos set them. Set false to stop managing forwarding via host hygiene."
   type        = bool
   default     = true
 }

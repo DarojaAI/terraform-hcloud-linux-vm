@@ -62,6 +62,8 @@ export HYGIENE_SSHD_PERSOURCE_PENALTIES="${hygiene_sshd_persource_penalties}"
 export HYGIENE_FAIL2BAN_IGNOREIP="${hygiene_fail2ban_ignoreip}"
 # shellcheck disable=SC2154
 export HYGIENE_FAIL2BAN_REFRESH="${hygiene_fail2ban_refresh}"
+# shellcheck disable=SC2154
+export HYGIENE_SYSCTL_FORWARDING="${hygiene_sysctl_forwarding}"
 
 # ── 2b. fail2ban ignoreip static fallback data (GitHub Actions ranges) ──
 # Data only. host-hygiene.sh section 6 reads this when the live

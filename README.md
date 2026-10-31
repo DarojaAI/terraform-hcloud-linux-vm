@@ -203,6 +203,7 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `sshd_persource_penalties` | `PerSourcePenalties` keyword overrides for the same drop-in (issue #11); default `"noauth:0"` disables the pre-auth-connection priming term, other keywords keep distro defaults; `""` leaves the distro policy untouched | `string` | `"noauth:0"` | No |
 | `fail2ban_ignoreip` | Extra CIDRs appended to the fail2ban sshd jail's `ignoreip` (`10-lds-ignoreip.conf`), on top of loopback + GitHub Actions runner ranges resolved from `api.github.com/meta` | `string` | `""` | No |
 | `fail2ban_refresh` | Install the weekly `fail2ban-ignoreip-refresh` timer (re-resolves GitHub ranges, reloads only on change) | `bool` | `true` | No |
+| `sysctl_forwarding` | Write the forwarding drop-in `90-host-hygiene-forwarding.conf` (`net.ipv4.ip_forward=1`, `net.ipv6.conf.all.forwarding=1`), apply it, and assert the effective values from `/proc/sys`; `false` stops managing forwarding | `bool` | `true` | No |
 
 #### Server Type Reference
 
@@ -343,7 +344,7 @@ not ELF, so the script **rebuilds/repairs** the pin instead of blindly skipping.
 
 Every VM this module creates is born **bounded**: `scripts/first-boot.sh`
 (user_data) runs the generic host-hygiene engine `scripts/host-hygiene.sh`,
-which installs six workload-agnostic bounds:
+which installs seven workload-agnostic bounds:
 
 1. **journald cap** — `/etc/systemd/journald.conf.d/90-host-hygiene.conf` sets
    `SystemMaxUse` (default `1G`), so the journal can never fill the root disk.
@@ -404,6 +405,14 @@ which installs six workload-agnostic bounds:
    `fail2ban_refresh = true`) re-resolves the ranges into the cache and
    reloads fail2ban only when the rendered file changed;
    `fail2ban-client -t` validates before every reload.
+7. **sysctl forwarding** — `/etc/sysctl.d/90-host-hygiene-forwarding.conf`
+   enables IPv4 + IPv6 packet forwarding (`net.ipv4.ip_forward=1`,
+   `net.ipv6.conf.all.forwarding=1`), applied with `sysctl --system` and then
+   asserted from `/proc/sys` (fail loud on mismatch). Closes the writer gap
+   for the `linux-desktop-seed` `verify-vm-state.sh` check 6, which asserts
+   exactly these two keys — before this drop-in nothing in either repo wrote
+   them, so the check passed only because something outside both repos set
+   them. `sysctl_forwarding = false` disables management entirely.
 
 ### What runs when
 
@@ -415,6 +424,7 @@ which installs six workload-agnostic bounds:
 | disk-watch alarm | first boot + bootstrap | weekly (`Persistent=true`) | `disk-watch.timer` → `/usr/local/bin/host-hygiene-disk-watch.sh` | every VM (threshold var; `0` = off) |
 | sshd connection bounds | first boot + bootstrap | immediate (`sshd -t` + reload + effective-value assert) | `sshd` daemon (drop-in `09-sshd-limits.conf`) | every VM (`sshd_max_startups = "0"` = off) |
 | fail2ban sshd ignoreip | first boot + bootstrap | install: immediate; ranges re-resolved weekly (`Persistent=false`) | `fail2ban-ignoreip-refresh.timer` → reloads fail2ban only on change | every VM with fail2ban (drop-in `10-lds-ignoreip.conf`) |
+| sysctl forwarding | first boot + bootstrap | immediate (`sysctl --system` + `/proc/sys` effective-value assert) | kernel (drop-in `90-host-hygiene-forwarding.conf`) | every VM (`sysctl_forwarding = "false"` = off) |
 
 ### Knobs
 
@@ -436,6 +446,7 @@ All knobs are module variables (see the [Inputs](#inputs) table), flow into
 | `sshd_keepalive_count` | `3` | sshd `ClientAliveCountMax` |
 | `fail2ban_ignoreip` | `""` | extra CIDRs appended to the sshd jail's `ignoreip` (besides loopback + GitHub ranges) |
 | `fail2ban_refresh` | `true` | weekly `fail2ban-ignoreip-refresh` timer (re-resolves GitHub ranges, reloads only on change) |
+| `sysctl_forwarding` | `true` | IPv4/IPv6 forwarding drop-in + effective-value assert |
 
 ### Existing VMs (bootstrap)
 
@@ -463,7 +474,8 @@ The engine also self-copies to `/opt/host-hygiene.sh`, so a re-run is just
 `--check` answers, read-only and without root: *"does this host still match
 what this engine would write?"* It renders every managed artifact into a temp
 dir and compares it byte-for-byte with the live file — nothing is mutated,
-nothing is reloaded, and no `systemctl`/`sshd`/`apt` is ever invoked:
+nothing is reloaded, and no `systemctl`/`sshd`/`apt`/`sysctl` is ever
+invoked:
 
 ```bash
 bash scripts/bootstrap-hygiene.sh --check      # or: bash /opt/host-hygiene.sh --check
@@ -593,11 +605,11 @@ terraform-hcloud-linux-desktop/
 ├── scripts/        ← provisioner scripts shipped to the VM
 │   ├── first-boot.sh        ← user_data umbrella: embeds the two engines below
 │   ├── git-pin.sh           ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
-│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch, sshd bounds, fail2ban sshd ignoreip)
+│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch, sshd bounds, fail2ban sshd ignoreip, sysctl forwarding)
 │   └── bootstrap-hygiene.sh ← idempotent bootstrap for already-provisioned VMs
 ├── etc/fail2ban/   ← static fallback data: github-actions-cidrs.txt (GitHub Actions runner ranges)
 ├── variables.tf    ← all configurable inputs (incl. host-hygiene knobs)
-├── tests/          ← hermetic self-tests (tests/sshd-limits.bats, tests/hygiene-check.bats, tests/fail2ban-ignoreip.bats)
+├── tests/          ← hermetic self-tests (sshd-limits.bats, fail2ban-ignoreip.bats, hygiene-check.bats, sysctl-forwarding.bats)
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
 ├── README.md       ← this file
