@@ -255,16 +255,40 @@ EOF
 }
 
 @test "dry-run prints the rendered drop-in and writes NOTHING on this host" {
+	# Host-state neutral (2026-10-31): the original assertion was
+	# `[ ! -e <path> ]`, which fails on any host where the engine has
+	# already been applied — i.e. it asserted the *host's* history, not the
+	# dry-run's behaviour. A dry-run is proven by the host being unchanged:
+	# snapshot (existence, inode, mtime, size) before and after.
+	local paths=(
+		/etc/fail2ban/jail.d/10-lds-ignoreip.conf
+		/etc/systemd/system/fail2ban-ignoreip-refresh.service
+		/etc/systemd/system/fail2ban-ignoreip-refresh.timer
+		/usr/local/bin/fail2ban-ignoreip-refresh.sh
+		/opt/github-actions-cidrs.txt
+		/var/lib/host-hygiene/fail2ban-cidrs.txt
+	)
+	snapshot() {
+		local p
+		for p in "${paths[@]}"; do
+			if [ -e "$p" ]; then
+				printf 'present %s %s %s\n' "$p" "$(stat -c '%i:%Y:%s' "$p" 2>/dev/null || echo unreadable)" \
+					"$(md5sum "$p" 2>/dev/null | cut -d' ' -f1)"
+			else
+				printf 'absent  %s\n' "$p"
+			fi
+		done
+	}
+	local before after
+	before="$(snapshot)"
+
 	run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" HYGIENE_DRY_RUN=1 bash "$ENGINE"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -qi 'fail2ban-ignoreip'
 	echo "$output" | grep -qiE 'DRY RUN: would write .*10-lds-ignoreip'
-	[ ! -e /etc/fail2ban/jail.d/10-lds-ignoreip.conf ]
-	[ ! -e /etc/systemd/system/fail2ban-ignoreip-refresh.service ]
-	[ ! -e /etc/systemd/system/fail2ban-ignoreip-refresh.timer ]
-	[ ! -e /usr/local/bin/fail2ban-ignoreip-refresh.sh ]
-	[ ! -e /opt/github-actions-cidrs.txt ]
-	[ ! -e /var/lib/host-hygiene/fail2ban-cidrs.txt ]
+
+	after="$(snapshot)"
+	[ "$before" = "$after" ]
 }
 
 @test "rationale, evidence, parser, fallback file and gates are wired into the engine" {
