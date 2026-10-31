@@ -151,3 +151,20 @@ variable "sshd_keepalive_count" {
   type        = number
   default     = 3
 }
+
+variable "fail2ban_ignoreip" {
+  description = "Extra IP/CIDR ranges appended to the fail2ban sshd jail's ignoreip in /etc/fail2ban/jail.d/10-lds-ignoreip.conf (space-separated), on top of loopback and the GitHub Actions runner egress ranges. The GitHub ranges are resolved live from https://api.github.com/meta -> \"actions\" at install time and refreshed weekly by the fail2ban-ignoreip-refresh timer (GitHub updates them weekly); a dated static snapshot embedded in the engine covers network-fetch failures so the jail never loses its exemptions. Issue DarojaAI/terraform-hcloud-linux-vm#10: runner IPs were banned mid-deploy by the sshd jail (maxretry 5), burning the deploy's rc=255 retry budget. Empty string = no extra ranges."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.fail2ban_ignoreip == "" || alltrue([for cidr in compact(split(" ", var.fail2ban_ignoreip)) : can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9a-fA-F:]+/[0-9]{1,3}$", cidr))])
+    error_message = "fail2ban_ignoreip must be a space-separated list of IPv4/IPv6 CIDR ranges (e.g. \"203.0.113.0/24\"), or empty."
+  }
+}
+
+variable "fail2ban_refresh" {
+  description = "Install and enable the weekly fail2ban-ignoreip-refresh systemd timer: re-resolves the GitHub Actions runner ranges from api.github.com/meta and reloads fail2ban ONLY when the rendered ignoreip drop-in changed (GitHub changes these ranges over time). false = still manage the ignoreip drop-in but skip the refresh unit."
+  type        = bool
+  default     = true
+}

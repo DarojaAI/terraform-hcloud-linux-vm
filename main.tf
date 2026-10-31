@@ -41,6 +41,21 @@ resource "hcloud_server" "main" {
     hygiene_sshd_keepalive_interval  = tostring(var.sshd_keepalive_interval)
     hygiene_sshd_keepalive_count     = tostring(var.sshd_keepalive_count)
     hygiene_sshd_persource_penalties = var.sshd_persource_penalties
+    git_pin_script                   = file("${path.module}/scripts/git-pin.sh")
+    hygiene_script                   = file("${path.module}/scripts/host-hygiene.sh")
+    hygiene_journald_max_use         = var.journald_max_use
+    hygiene_docker_prune             = tostring(var.enable_docker_prune)
+    hygiene_docker_prune_until       = var.docker_prune_until
+    hygiene_unattended_upgrades      = tostring(var.enable_unattended_upgrades)
+    hygiene_disk_alert_pct           = tostring(var.disk_alert_pct)
+    hygiene_disk_webhook_url         = var.disk_alert_webhook_url
+    hygiene_sshd_max_startups        = var.sshd_max_startups
+    hygiene_sshd_max_sessions        = tostring(var.sshd_max_sessions)
+    hygiene_sshd_keepalive_interval  = tostring(var.sshd_keepalive_interval)
+    hygiene_sshd_keepalive_count     = tostring(var.sshd_keepalive_count)
+    hygiene_fail2ban_ignoreip        = var.fail2ban_ignoreip
+    hygiene_fail2ban_refresh         = tostring(var.fail2ban_refresh)
+    fail2ban_cidrs_file              = file("${path.module}/etc/fail2ban/github-actions-cidrs.txt")
   })
 
   labels = var.labels

@@ -201,6 +201,8 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `disk_alert_webhook_url` | Optional webhook URL for disk-watch alarm JSON POSTs; empty = off (journald marker always fires) | `string` | `""` | No |
 | `sshd_max_startups` | MaxStartups triple for the sshd drop-in `09-sshd-limits.conf`; `"0"` stops managing sshd bounds | `string` | `"40:30:100"` | No |
 | `sshd_persource_penalties` | `PerSourcePenalties` keyword overrides for the same drop-in (issue #11); default `"noauth:0"` disables the pre-auth-connection priming term, other keywords keep distro defaults; `""` leaves the distro policy untouched | `string` | `"noauth:0"` | No |
+| `fail2ban_ignoreip` | Extra CIDRs appended to the fail2ban sshd jail's `ignoreip` (`10-lds-ignoreip.conf`), on top of loopback + GitHub Actions runner ranges resolved from `api.github.com/meta` | `string` | `""` | No |
+| `fail2ban_refresh` | Install the weekly `fail2ban-ignoreip-refresh` timer (re-resolves GitHub ranges, reloads only on change) | `bool` | `true` | No |
 
 #### Server Type Reference
 
@@ -341,7 +343,7 @@ not ELF, so the script **rebuilds/repairs** the pin instead of blindly skipping.
 
 Every VM this module creates is born **bounded**: `scripts/first-boot.sh`
 (user_data) runs the generic host-hygiene engine `scripts/host-hygiene.sh`,
-which installs five workload-agnostic bounds:
+which installs six workload-agnostic bounds:
 
 1. **journald cap** — `/etc/systemd/journald.conf.d/90-host-hygiene.conf` sets
    `SystemMaxUse` (default `1G`), so the journal can never fill the root disk.
@@ -377,6 +379,26 @@ which installs five workload-agnostic bounds:
    grace-exceeded/refuseconnection protections stay at distro defaults; set
    `sshd_persource_penalties = ""` to leave the distro policy untouched.
    `sshd_max_startups = "0"` disables sshd management entirely.
+6. **fail2ban sshd ignoreip** — `/etc/fail2ban/jail.d/10-lds-ignoreip.conf`
+   exempts the GitHub Actions runner egress ranges from the sshd jail. The
+   ranges are resolved live from `https://api.github.com/meta` → `actions`
+   at install time (only `actions` — the `hooks` ranges are GitHub→VM
+   webhook deliveries that never SSH in and would needlessly widen the
+   jail's blind spot), plus loopback and any `fail2ban_ignoreip` extras. On
+   a network-fetch failure the engine falls back to the static data file
+   `etc/fail2ban/github-actions-cidrs.txt` (a dated snapshot of the range
+   list — data only, deployed on VMs to `/opt/github-actions-cidrs.txt`,
+   path overridable via `HYGIENE_FAIL2BAN_FALLBACK_FILE`); if that is
+   unavailable too, the run fails loudly rather than write an empty/partial
+   exemption. Issue #10: the
+   deploy's `ssh-copy-id` probe and runner SSH land as `Connection closed
+   by authenticating user …` auth failures that the jail counted, so a
+   runner IP was banned mid-deploy (prod showed 13 bans, incl. Azure
+   `4.182.219.135`, `209.99.190.215`) and the deploy burned its `rc=255`
+   retry budget. A weekly `fail2ban-ignoreip-refresh` timer
+   (`Persistent=false`, `fail2ban_refresh = true`) re-resolves the ranges
+   and reloads fail2ban only when the rendered file changed;
+   `fail2ban-client -t` validates before every reload.
 
 ### What runs when
 
@@ -387,6 +409,7 @@ which installs five workload-agnostic bounds:
 | unattended security upgrades | first boot + bootstrap | daily (`apt-daily-upgrade.timer`) | apt `APT::Periodic::Unattended-Upgrade` | every VM, security origins only |
 | disk-watch alarm | first boot + bootstrap | weekly (`Persistent=true`) | `disk-watch.timer` → `/usr/local/bin/host-hygiene-disk-watch.sh` | every VM (threshold var; `0` = off) |
 | sshd connection bounds | first boot + bootstrap | immediate (`sshd -t` + reload + effective-value assert) | `sshd` daemon (drop-in `09-sshd-limits.conf`) | every VM (`sshd_max_startups = "0"` = off) |
+| fail2ban sshd ignoreip | first boot + bootstrap | install: immediate; ranges re-resolved weekly (`Persistent=false`) | `fail2ban-ignoreip-refresh.timer` → reloads fail2ban only on change | every VM with fail2ban (drop-in `10-lds-ignoreip.conf`) |
 
 ### Knobs
 
@@ -406,6 +429,8 @@ All knobs are module variables (see the [Inputs](#inputs) table), flow into
 | `sshd_max_sessions` | `20` | sshd `MaxSessions` |
 | `sshd_keepalive_interval` | `60` | sshd `ClientAliveInterval` seconds |
 | `sshd_keepalive_count` | `3` | sshd `ClientAliveCountMax` |
+| `fail2ban_ignoreip` | `""` | extra CIDRs appended to the sshd jail's `ignoreip` (besides loopback + GitHub ranges) |
+| `fail2ban_refresh` | `true` | weekly `fail2ban-ignoreip-refresh` timer (re-resolves GitHub ranges, reloads only on change) |
 
 ### Existing VMs (bootstrap)
 
@@ -469,7 +494,7 @@ per-workload retention policies belong.
 |---|---|
 | Provision time | 1–3 minutes (Hetzner usually fast, can take longer under load) |
 | First-boot git build | +2–5 min on the first boot of a fresh VM (only when the pin is absent; idempotent afterwards) |
-| First-boot host hygiene | seconds — journald drop-in, two timers, apt fragments (unattended-upgrades package only when missing) |
+| First-boot host hygiene | seconds — journald drop-in, three timers, apt fragments, fail2ban drop-in + weekly range fetch (unattended-upgrades package only when missing) |
 | Server status check | Immediate via `hcloud_server.main.status` output |
 | Idle cost |取决于 server_type — see pricing table above |
 
@@ -513,6 +538,30 @@ terraform import hcloud_server.main <SERVER_ID>
 
 Then run `terraform plan` to verify the imported state matches your configuration.
 
+### SSH refused — banned by fail2ban, or dropped by MaxStartups?
+
+Both a fail2ban ban and an sshd `MaxStartups` drop present identically to the
+client (`ssh`/`ssh-copy-id` hangs or closes immediately), so check the
+server's logs to tell them apart:
+
+```bash
+# fail2ban ban?                     → unban the IP and find who it belonged to
+journalctl -u fail2ban | grep -iE 'ban' | tail -20
+
+# OR sshd MaxStartups drop (this repo bounds it: 09-sshd-limits.conf)?
+journalctl -u ssh | grep -iE 'maxstartups' | tail -20
+```
+
+If fail2ban banned the IP (e.g. a GitHub Actions runner IP that was banned
+mid-deploy before the `10-lds-ignoreip.conf` exemption landed — issue #10),
+unban it immediately; this module's `fail2ban_ignoreip`/`fail2ban_refresh`
+knobs prevent recurrences:
+
+```bash
+sudo fail2ban-client set sshd unbanip <ip>       # e.g. 4.182.219.135
+sudo fail2ban-client status sshd                   # verify the ban list
+```
+
 ---
 
 ## Documentation
@@ -535,10 +584,11 @@ terraform-hcloud-linux-desktop/
 ├── scripts/        ← provisioner scripts shipped to the VM
 │   ├── first-boot.sh        ← user_data umbrella: embeds the two engines below
 │   ├── git-pin.sh           ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
-│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch, sshd bounds)
+│   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch, sshd bounds, fail2ban sshd ignoreip)
 │   └── bootstrap-hygiene.sh ← idempotent bootstrap for already-provisioned VMs
+├── etc/fail2ban/   ← static fallback data: github-actions-cidrs.txt (GitHub Actions runner ranges)
 ├── variables.tf    ← all configurable inputs (incl. host-hygiene knobs)
-├── tests/          ← hermetic self-tests (tests/sshd-limits.bats, tests/hygiene-check.bats)
+├── tests/          ← hermetic self-tests (tests/sshd-limits.bats, tests/hygiene-check.bats, tests/fail2ban-ignoreip.bats)
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
 ├── README.md       ← this file

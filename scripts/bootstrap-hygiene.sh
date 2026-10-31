@@ -29,6 +29,10 @@
 #                                 issue #11 — disables the pre-auth-connection priming term,
 #                                 keeps other keywords at distro defaults); empty = leave the
 #                                 distro policy untouched (no line rendered)
+#   HYGIENE_FAIL2BAN_IGNOREIP     extra CIDRs appended to the fail2ban sshd jail's ignoreip (default empty)
+#   HYGIENE_FAIL2BAN_REFRESH      true|false — weekly GitHub-range refresh unit (default true)
+#   HYGIENE_FAIL2BAN_FALLBACK_FILE  path to the static GitHub-range CIDR file (default: this repo's
+#                                  etc/fail2ban/github-actions-cidrs.txt, or /opt/github-actions-cidrs.txt)
 set -euo pipefail
 
 usage() {
@@ -48,6 +52,7 @@ Usage: sudo bash scripts/bootstrap-hygiene.sh [--apply|--check]
     HYGIENE_SSHD_MAX_STARTUPS=40:30:100 HYGIENE_SSHD_MAX_SESSIONS=20
     HYGIENE_SSHD_KEEPALIVE_INTERVAL=60 HYGIENE_SSHD_KEEPALIVE_COUNT=3
     HYGIENE_SSHD_PERSOURCE_PENALTIES=noauth:0  (empty = distro default)
+    HYGIENE_FAIL2BAN_IGNOREIP=203.0.113.0/24 HYGIENE_FAIL2BAN_REFRESH=true
 EOF
 }
 
