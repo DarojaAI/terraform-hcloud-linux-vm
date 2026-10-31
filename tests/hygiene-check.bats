@@ -39,7 +39,10 @@ setup() {
 	F2B_CIDR_FIXTURE="140.82.112.0/20 209.99.190.0/24 2603:1020::/47"
 	# The engine's own section-6 path vars (renders interpolate them into the
 	# unit/comment bytes) — the fixtures must be byte-identical to the
-	# engine's renders, so the fixture shell needs the same values.
+	# engine's renders, so the fixture shell needs the same values (the
+	# engine's assignments stay canonical; HYGIENE_ROOT is applied at the
+	# read/write points, so the fixture shell mirrors the engine's values
+	# exactly).
 	FAIL2BAN_JAIL_D=/etc/fail2ban/jail.d
 	FAIL2BAN_DROP_IN=$FAIL2BAN_JAIL_D/10-lds-ignoreip.conf
 	FAIL2BAN_CACHE=/var/lib/host-hygiene/fail2ban-cidrs.txt
@@ -68,7 +71,8 @@ EOF
 	          fail2ban_cidr_ok fail2ban_fallback_file fail2ban_github_actions \
 	          fail2ban_ignoreip_dropin fail2ban_ignoreip_reload fail2ban_ignoreip_apply \
 	          fail2ban_refresh_unit render_fail2ban_refresh_service \
-	          render_fail2ban_refresh_timer render_fail2ban_ignoreip_refresh_script; do
+	          render_fail2ban_refresh_timer render_fail2ban_ignoreip_refresh_script \
+	          render_sysctl_forwarding; do
 		eval "$(sed -n "/^${fn}() {/,/^}$/p" "$ENGINE")"
 		[ "$(type -t "$fn")" = "function" ]
 	done
@@ -96,7 +100,8 @@ seed_fixtures() {
 		"etc/fail2ban/jail.d/10-lds-ignoreip.conf|fail2ban_ignoreip_dropin" \
 		"usr/local/bin/fail2ban-ignoreip-refresh.sh|render_fail2ban_ignoreip_refresh_script" \
 		"etc/systemd/system/fail2ban-ignoreip-refresh.service|render_fail2ban_refresh_service" \
-		"etc/systemd/system/fail2ban-ignoreip-refresh.timer|render_fail2ban_refresh_timer"; do
+		"etc/systemd/system/fail2ban-ignoreip-refresh.timer|render_fail2ban_refresh_timer" \
+		"etc/sysctl.d/90-host-hygiene-forwarding.conf|render_sysctl_forwarding"; do
 		rel="${spec%%|*}"
 		fn="${spec#*|}"
 		mkdir -p "$LIVE/$(dirname "$rel")"
@@ -113,7 +118,7 @@ seed_fixtures() {
 	seed_fixtures
 	run bash "$ENGINE" --check
 	[ "$status" -eq 0 ]
-	echo "$output" | grep -q "check: 12 artifacts compared"
+	echo "$output" | grep -q "check: 13 artifacts compared"
 	for rel in \
 		"/etc/systemd/journald.conf.d/90-host-hygiene.conf" \
 		"/etc/apt/apt.conf.d/52host-hygiene-auto-upgrades" \
@@ -126,7 +131,8 @@ seed_fixtures() {
 		"/etc/fail2ban/jail.d/10-lds-ignoreip.conf" \
 		"/usr/local/bin/fail2ban-ignoreip-refresh.sh" \
 		"/etc/systemd/system/fail2ban-ignoreip-refresh.service" \
-		"/etc/systemd/system/fail2ban-ignoreip-refresh.timer"; do
+		"/etc/systemd/system/fail2ban-ignoreip-refresh.timer" \
+		"/etc/sysctl.d/90-host-hygiene-forwarding.conf"; do
 		echo "$output" | grep -q "^ok       $rel\$" || {
 			echo "missing ok line for $rel" >&3
 			return 1
@@ -153,7 +159,7 @@ seed_fixtures() {
 	[ "$status" -eq 1 ]
 	echo "$output" | grep -q "DRIFT    /etc/fail2ban/jail.d/10-lds-ignoreip.conf"
 	echo "$output" | grep -qE 'differs at line [0-9]+: live ".*2001:db8::/32.*" vs engine ".*"'
-	echo "$output" | grep -q "check: 12 artifacts compared"
+	echo "$output" | grep -q "check: 13 artifacts compared"
 }
 
 @test "missing artifact → exit 1 drift; absent fail2ban cache → exit 2 cannot-evaluate" {
@@ -162,7 +168,7 @@ seed_fixtures() {
 	run bash "$ENGINE" --check
 	[ "$status" -eq 1 ]
 	echo "$output" | grep -q "DRIFT    /etc/ssh/sshd_config.d/09-sshd-limits.conf  (missing on live host)"
-	echo "$output" | grep -q "check: 12 artifacts compared"
+	echo "$output" | grep -q "check: 13 artifacts compared"
 
 	# Without the resolved-list cache the jail drop-in cannot be evaluated:
 	# its expected content is unknowable, and --check must neither fetch nor
@@ -205,10 +211,10 @@ seed_fixtures() {
 	rm -rf "$FAKE_ROOT"
 	[ "$status" -eq 2 ]
 	echo "$output" | grep -q "CANNOT-EVALUATE /etc/systemd/journald.conf.d/90-host-hygiene.conf  (live file not readable)"
-	# everything else still evaluated (9 = 8 standard + the fail2ban drop-in,
-	# which renders ok from its seeded cache; the refresh trio is
-	# refresh-gated off above)
-	echo "$output" | grep -q "check: 9 artifacts compared"
+	# everything else still evaluated: 8 standard artifacts + the fail2ban
+	# drop-in (renders ok from its seeded cache) + the sysctl config; the
+	# refresh trio is switched off above.
+	echo "$output" | grep -q "check: 10 artifacts compared"
 }
 
 @test "--check writes nothing: live fixtures bit-identical (inode, mtime, mode)" {
@@ -226,15 +232,15 @@ seed_fixtures() {
 	[ "$output" = "0" ]
 }
 
-@test "--check never invokes systemctl, sshd, curl, wget or fail2ban-client" {
+@test "--check never invokes systemctl, sshd, curl, wget, fail2ban-client, sysctl or apt-get" {
 	seed_fixtures
 	STUB="$BATS_TEST_TMPDIR/stubs"
 	mkdir -p "$STUB"
-	# Every apply-side binary the fail2ban/docker/journald sections could
-	# reach: if --check slipped into apply machinery it would trip one of
-	# these (exit 99) and leave a marker. The fail2ban-client stub here also
-	# shadows the setup() presence stub, so the refresh gate still opens.
-	for b in systemctl sshd curl wget fail2ban-client; do
+	# Every apply-side binary any section could reach: if --check slipped into
+	# apply machinery it would trip one of these (exit 99) and leave a marker.
+	# The fail2ban-client stub here also shadows setup()'s presence stub, so the
+	# refresh gate still opens and the artifact stays in the compared surface.
+	for b in systemctl sshd curl wget fail2ban-client sysctl apt-get; do
 		cat > "$STUB/$b" <<EOF
 #!/bin/bash
 echo "invoked $b" >> "$STUB/marker"
@@ -245,6 +251,4 @@ EOF
 	run env PATH="$STUB:$PATH" bash "$ENGINE" --check
 	[ "$status" -eq 0 ]
 	[ ! -e "$STUB/marker" ]
-	# engines that reach apply machinery would trip the stubs
-	! grep -q "invoked" "$STUB/marker" 2>/dev/null
 }

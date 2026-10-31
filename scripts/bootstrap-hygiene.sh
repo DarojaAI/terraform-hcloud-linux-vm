@@ -33,6 +33,7 @@
 #   HYGIENE_FAIL2BAN_REFRESH      true|false — weekly GitHub-range refresh unit (default true)
 #   HYGIENE_FAIL2BAN_FALLBACK_FILE  path to the static GitHub-range CIDR file (default: this repo's
 #                                  etc/fail2ban/github-actions-cidrs.txt, or /opt/github-actions-cidrs.txt)
+#   HYGIENE_SYSCTL_FORWARDING     true|false — IPv4/IPv6 forwarding drop-in (default true)
 set -euo pipefail
 
 usage() {
@@ -53,6 +54,7 @@ Usage: sudo bash scripts/bootstrap-hygiene.sh [--apply|--check]
     HYGIENE_SSHD_KEEPALIVE_INTERVAL=60 HYGIENE_SSHD_KEEPALIVE_COUNT=3
     HYGIENE_SSHD_PERSOURCE_PENALTIES=noauth:0  (empty = distro default)
     HYGIENE_FAIL2BAN_IGNOREIP=203.0.113.0/24 HYGIENE_FAIL2BAN_REFRESH=true
+    HYGIENE_SYSCTL_FORWARDING=true
 EOF
 }
 
