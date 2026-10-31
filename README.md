@@ -200,6 +200,7 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `disk_alert_pct` | Root-filesystem used-% threshold for the weekly disk-watch alarm; `0` disables the alarm | `number` | `85` | No |
 | `disk_alert_webhook_url` | Optional webhook URL for disk-watch alarm JSON POSTs; empty = off (journald marker always fires) | `string` | `""` | No |
 | `sshd_max_startups` | MaxStartups triple for the sshd drop-in `09-sshd-limits.conf`; `"0"` stops managing sshd bounds | `string` | `"40:30:100"` | No |
+| `sshd_persource_penalties` | `PerSourcePenalties` keyword overrides for the same drop-in (issue #11); default `"noauth:0"` disables the pre-auth-connection priming term, other keywords keep distro defaults; `""` leaves the distro policy untouched | `string` | `"noauth:0"` | No |
 
 #### Server Type Reference
 
@@ -364,6 +365,17 @@ which installs five workload-agnostic bounds:
    connections at random from the 3rd scanner in — 54 `drop connection …
    Maxstartups` events in 6 h on the test VM and CI runners failing with
    `kex_exchange_identification: read: Connection reset by peer`.
+   OpenSSH 10.2's per-source penalties (enabled by default) produce the
+   **same** client error through the **same** `drop_connection()` path — the
+   `noauth:1` term makes a deploy's short-lived pre-auth connections from one
+   runner IP accrue a refusal (up to `max:600`), so when you see
+   `kex_exchange_identification: read: Connection reset by peer` again, check
+   `sshd -T | grep -i persourcepenalties` too, not just `MaxStartups`. This
+   module renders `PerSourcePenalties noauth:0` by default
+   (`sshd_persource_penalties`) — a partial override that stops benign
+   pre-auth bursts from being the trigger while crash/authfail/
+   grace-exceeded/refuseconnection protections stay at distro defaults; set
+   `sshd_persource_penalties = ""` to leave the distro policy untouched.
    `sshd_max_startups = "0"` disables sshd management entirely.
 
 ### What runs when
@@ -390,6 +402,7 @@ All knobs are module variables (see the [Inputs](#inputs) table), flow into
 | `disk_alert_pct` | `85` | root-used % alarm threshold (`0` disables) |
 | `disk_alert_webhook_url` | `""` | webhook for alarm POSTs (empty = off; journald marker always fires) |
 | `sshd_max_startups` | `"40:30:100"` | sshd `MaxStartups` triple (09- drop-in); `"0"`/empty = don't manage sshd |
+| `sshd_persource_penalties` | `"noauth:0"` | sshd `PerSourcePenalties` keyword overrides (09- drop-in); `""` = leave distro default |
 | `sshd_max_sessions` | `20` | sshd `MaxSessions` |
 | `sshd_keepalive_interval` | `60` | sshd `ClientAliveInterval` seconds |
 | `sshd_keepalive_count` | `3` | sshd `ClientAliveCountMax` |
