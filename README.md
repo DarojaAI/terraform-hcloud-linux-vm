@@ -395,9 +395,14 @@ which installs six workload-agnostic bounds:
    by authenticating user …` auth failures that the jail counted, so a
    runner IP was banned mid-deploy (prod showed 13 bans, incl. Azure
    `4.182.219.135`, `209.99.190.215`) and the deploy burned its `rc=255`
-   retry budget. A weekly `fail2ban-ignoreip-refresh` timer
-   (`Persistent=false`, `fail2ban_refresh = true`) re-resolves the ranges
-   and reloads fail2ban only when the rendered file changed;
+   retry budget. The *resolved* list is persisted by every apply into a
+   cache (`/var/lib/host-hygiene/fail2ban-cidrs.txt`) and the drop-in is
+   rendered from that cache — the deterministic input `--check` compares
+   against (check mode never fetches or writes; a missing cache is reported
+   as `CANNOT-EVALUATE`, never silently passed). A weekly
+   `fail2ban-ignoreip-refresh` timer (`Persistent=false`,
+   `fail2ban_refresh = true`) re-resolves the ranges into the cache and
+   reloads fail2ban only when the rendered file changed;
    `fail2ban-client -t` validates before every reload.
 
 ### What runs when
@@ -465,7 +470,11 @@ bash scripts/bootstrap-hygiene.sh --check      # or: bash /opt/host-hygiene.sh -
 ```
 
 One line per artifact (path included, so the report pastes straight into an
-issue), plus a summary count. Exit codes:
+issue), plus a summary count. The fail2ban drop-in renders from the
+resolved-list cache (`/var/lib/host-hygiene/fail2ban-cidrs.txt`) — check
+mode never fetches GitHub ranges and never writes; an absent/unusable cache
+therefore reports `CANNOT-EVALUATE` (exit 2) instead of silently passing or
+guessing. Exit codes:
 
 | Code | Meaning |
 |---|---|

@@ -92,12 +92,14 @@ EOF
 	FAIL2BAN_REFRESH_SCRIPT="$ROOT/usr/local/bin/fail2ban-ignoreip-refresh.sh"
 	FAIL2BAN_REFRESH_SERVICE="$ROOT/etc/systemd/system/fail2ban-ignoreip-refresh.service"
 	FAIL2BAN_REFRESH_TIMER="$ROOT/etc/systemd/system/fail2ban-ignoreip-refresh.timer"
+	FAIL2BAN_CACHE="$ROOT/var/lib/host-hygiene/fail2ban-cidrs.txt"
 }
 
 FIXTURE_CIDRS="140.82.112.0/20 209.99.190.0/24 2603:1020::/47"
 
 render() {
-	HYGIENE_FAIL2BAN_IGNOREIP="${HYGIENE_FAIL2BAN_IGNOREIP:-}" \
+	FAIL2BAN_CIDRS="$FIXTURE_CIDRS" \
+		HYGIENE_FAIL2BAN_IGNOREIP="${HYGIENE_FAIL2BAN_IGNOREIP:-}" \
 		fail2ban_ignoreip_dropin > "$1"
 }
 
@@ -185,6 +187,10 @@ EOF
 	[ -f "$FAIL2BAN_DROP_IN" ]
 	[ "$(stat -c %a "$FAIL2BAN_DROP_IN")" = "644" ]
 	grep -q '^\[sshd\]' "$FAIL2BAN_DROP_IN"
+	# apply persists the resolved list into the cache (one CIDR per line) —
+	# the deterministic input --check renders the drop-in from
+	[ -f "$FAIL2BAN_CACHE" ]
+	[ "$(tr -d '[:space:]' < "$FAIL2BAN_CACHE")" = "$(printf '%s' "$FIXTURE_CIDRS" | tr -d '[:space:]')" ]
 	local validations reloads
 	validations=$(grep -c 'fail2ban-client' "$F2B_LOG")
 	[ "$validations" -eq 1 ]
@@ -213,10 +219,11 @@ EOF
 	[ "$status" -ne 0 ]
 	[ -z "$output" ]
 	echo "$stderr" | grep -qi 'refusing'
-	# apply must NOT create the drop-in and must return non-zero
+	# apply must NOT create the drop-in or the cache and must return non-zero
 	HYGIENE_FAIL2BAN_FALLBACK_FILE="$missing" run fail2ban_ignoreip_apply
 	[ "$status" -ne 0 ]
 	[ ! -e "$FAIL2BAN_DROP_IN" ]
+	[ ! -e "$FAIL2BAN_CACHE" ]
 }
 
 @test "malformed line in fallback file rejects the file (never a partial exemption)" {
@@ -257,6 +264,7 @@ EOF
 	[ ! -e /etc/systemd/system/fail2ban-ignoreip-refresh.timer ]
 	[ ! -e /usr/local/bin/fail2ban-ignoreip-refresh.sh ]
 	[ ! -e /opt/github-actions-cidrs.txt ]
+	[ ! -e /var/lib/host-hygiene/fail2ban-cidrs.txt ]
 }
 
 @test "rationale, evidence, parser, fallback file and gates are wired into the engine" {

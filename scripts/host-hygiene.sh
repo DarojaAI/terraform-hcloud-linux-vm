@@ -333,10 +333,18 @@ hygiene_install() {
 	if [ "$MODE" = check ]; then
 		local dest="$CHECK_TMP${path}"
 		mkdir -p "$(dirname "$dest")"
-		if ! "$fn" > "$dest.tmp" 2>/dev/null; then
-			HYGIENE_RENDER_FAILS="${HYGIENE_RENDER_FAILS} $path"
+		if ! "$fn" > "$dest.tmp" 2>"$dest.err"; then
+			# Carry the render's own reason (its first stderr line) into the
+			# report — e.g. the fail2ban drop-in reports "cache absent — no
+			# resolved CIDR list" instead of a generic "render failed".
+			local reason
+			reason=$(sed -n '1p' "$dest.err" 2>/dev/null)
+			[ -n "$reason" ] || reason="render failed"
+			HYGIENE_RENDER_FAILS="${HYGIENE_RENDER_FAILS}${path}|${reason}"$'\n'
+			rm -f "$dest.tmp" "$dest.err"
 			return 0
 		fi
+		rm -f "$dest.err"
 		mv -f "$dest.tmp" "$dest"
 		return 0
 	fi
@@ -738,6 +746,13 @@ fi
 # the file is malformed/empty), the section fails loudly and writes NO
 # drop-in — never an empty or partial exemption.
 #
+# Deterministic range source: apply resolves the list (live meta first, then
+# the static fallback), writes the RESOLVED list to a cache file
+# (/var/lib/host-hygiene/fail2ban-cidrs.txt, HYGIENE_ROOT-relative under
+# test) and renders the drop-in from that cache. --check renders from the
+# cache too and never touches the network; a missing/unusable cache makes
+# the drop-in CANNOT-EVALUATE instead of silently passing or fetching.
+#
 # Knobs: HYGIENE_FAIL2BAN_IGNOREIP (extra CIDRs appended to the ignoreip
 # line; empty default) and HYGIENE_FAIL2BAN_REFRESH (true|false, default
 # true — install the weekly refresh unit). Defaulted here, standalone-valid.
@@ -861,15 +876,21 @@ fail2ban_github_actions() {
 }
 
 # Renders /etc/fail2ban/jail.d/10-lds-ignoreip.conf — the SINGLE drop-in
-# writer, shared verbatim by the engine's apply path, the generated weekly
-# refresh helper (its functions are extracted verbatim from this file at
-# generation time) and tests/fail2ban-ignoreip.bats. Pure function: stdout
-# only, so the tests render it into a temp dir hermetically.
+# writer, shared verbatim by the engine's apply/check paths, the generated
+# weekly refresh helper (its functions are emitted verbatim at generation
+# time) and tests/fail2ban-ignoreip.bats. Pure function: stdout only, all
+# inputs from env/args — the resolved CIDR list comes in as
+# $FAIL2BAN_CIDRS (populated by apply from the resolver, by --check from
+# the resolved-list cache), never from a fetch or a write.
 fail2ban_ignoreip_dropin() {
-	local ranges
-	# resolver returns non-zero when live fetch AND fallback file both fail
-	# (or the file is malformed) — propagate so nothing partial is written
-	ranges=$(fail2ban_github_actions) || return 2
+	local ranges="${FAIL2BAN_CIDRS:-}"
+	if [ -z "${ranges// /}" ]; then
+		# Bare stderr line (no log prefix): hygiene_install captures the first
+		# line of stderr as the --check CANNOT-EVALUATE reason, so this text
+		# lands verbatim in the report.
+		echo "no resolved CIDR list — the jail drop-in renders only from $FAIL2BAN_CACHE, which --apply fills at resolve time; check never fetches or writes (run --apply to resolve)" >&2
+		return 2
+	fi
 	cat <<-EOF
 	# fail2ban sshd ignoreip - L1 host hygiene (scripts/host-hygiene.sh section 6).
 	# Exempts the GitHub Actions runner egress ranges from the sshd jail so a
@@ -877,15 +898,15 @@ fail2ban_ignoreip_dropin() {
 	# ssh-copy-id probe + runner SSH land as 'Connection closed by
 	# authenticating user' auth failures, which the jail counts; prod showed
 	# 13 bans incl. Azure 4.182.219.135 / 209.99.190.215).
-	# Ranges: resolved live from https://api.github.com/meta -> "actions" at
-	# install time; refreshed weekly by fail2ban-ignoreip-refresh.timer
-	# (GitHub updates the list weekly). If the fetch fails, the static
-	# fallback data file (etc/fail2ban/github-actions-cidrs.txt, captured
-	# 2026-10-31; deployed to /opt/github-actions-cidrs.txt) is rendered
-	# instead, so the jail never loses its exemptions. "hooks" ranges are
-	# deliberately NOT exempted (GitHub->VM webhook deliveries never SSH
-	# in). Extra ranges come from HYGIENE_FAIL2BAN_IGNOREIP (empty by
-	# default).
+	# Ranges: resolved from https://api.github.com/meta -> "actions" at
+	# apply time into the resolved-list cache ($FAIL2BAN_CACHE) and refreshed
+	# weekly by fail2ban-ignoreip-refresh.timer (GitHub updates the list
+	# weekly). If the fetch fails, the static fallback data file
+	# (etc/fail2ban/github-actions-cidrs.txt, captured 2026-10-31; deployed
+	# to /opt/github-actions-cidrs.txt) is resolved instead, so the jail
+	# never loses its exemptions. "hooks" ranges are deliberately NOT
+	# exempted (GitHub->VM webhook deliveries never SSH in). Extra ranges
+	# come from HYGIENE_FAIL2BAN_IGNOREIP (empty by default).
 	[sshd]
 	ignoreip = 127.0.0.1/8 ::1 $ranges $HYGIENE_FAIL2BAN_IGNOREIP
 	EOF
@@ -914,10 +935,19 @@ fail2ban_ignoreip_reload() {
 	fi
 }
 
-# Applies the drop-in (render -> tmp -> cmp -> install-or-skip + conditional
-# reload). The SAME function runs in the full engine apply path and in the
-# generated weekly refresh helper — one implementation for both.
+# Applies the drop-in (resolve -> persist cache -> render -> tmp -> cmp ->
+# install-or-skip + conditional reload). The SAME function runs in the full
+# engine apply path and in the generated weekly refresh helper — one
+# implementation for both. The resolved-list cache is written ONLY here
+# (never in --check, which reads it back read-only), so the cache is
+# truthful by construction: it is exactly what the last apply resolved.
 fail2ban_ignoreip_apply() {
+	local ranges
+	ranges=$(fail2ban_github_actions) || return 2
+	mkdir -p "$(dirname "$FAIL2BAN_CACHE")"
+	printf '%s\n' "${ranges// /$'\n'}" > "$FAIL2BAN_CACHE.tmp"
+	mv -f "$FAIL2BAN_CACHE.tmp" "$FAIL2BAN_CACHE"
+	FAIL2BAN_CIDRS=$ranges
 	mkdir -p "$FAIL2BAN_JAIL_D"
 	if ! fail2ban_ignoreip_dropin > "$FAIL2BAN_DROP_IN.tmp"; then
 		rm -f "$FAIL2BAN_DROP_IN.tmp"
@@ -936,6 +966,10 @@ fail2ban_ignoreip_apply() {
 
 FAIL2BAN_JAIL_D=/etc/fail2ban/jail.d
 FAIL2BAN_DROP_IN=$FAIL2BAN_JAIL_D/10-lds-ignoreip.conf
+# Resolved-list cache: the deterministic input for the drop-in render, read
+# back by --check. One valid CIDR per line, written only by apply
+# (fail2ban_ignoreip_apply); HYGIENE_ROOT-relative under test.
+FAIL2BAN_CACHE=/var/lib/host-hygiene/fail2ban-cidrs.txt
 FAIL2BAN_REFRESH_SCRIPT=/usr/local/bin/fail2ban-ignoreip-refresh.sh
 FAIL2BAN_REFRESH_SERVICE=/etc/systemd/system/fail2ban-ignoreip-refresh.service
 FAIL2BAN_REFRESH_TIMER=/etc/systemd/system/fail2ban-ignoreip-refresh.timer
@@ -977,13 +1011,101 @@ fail2ban_refresh_unit() {
 	esac
 }
 
-info "fail2ban-ignoreip: drop-in=$FAIL2BAN_DROP_IN refresh=$HYGIENE_FAIL2BAN_REFRESH extra_ips=${HYGIENE_FAIL2BAN_IGNOREIP:-none}"
-if [ -n "$HYGIENE_DRY_RUN" ]; then
-	if ! rendered=$(fail2ban_ignoreip_dropin); then
+# Arg-less renders for the unit pair — the shape hygiene_install expects
+# (fn invoked with no arguments); fail2ban_refresh_unit stays the shared
+# renderer for direct test extraction.
+render_fail2ban_refresh_service() {
+	fail2ban_refresh_unit service
+}
+render_fail2ban_refresh_timer() {
+	fail2ban_refresh_unit timer
+}
+
+# Renders the generated weekly refresh helper (fail2ban-ignoreip-refresh.sh)
+# — pure, stdout only: every embedded fail2ban_* function body is emitted
+# from the LIVE shell via `declare -f` (no file reads, no fetch, no writes),
+# so the helper installed by apply is byte-identical to the one --check
+# renders, and it can never drift from the engine's own functions.
+render_fail2ban_ignoreip_refresh_script() {
+	cat <<'F2B_REFRESH_HDR'
+#!/bin/bash
+# fail2ban-ignoreip-refresh.sh — weekly re-resolve of the GitHub Actions
+# runner ranges into the fail2ban sshd ignoreip drop-in.
+# GENERATED by scripts/host-hygiene.sh section 6. Single implementation:
+# the fail2ban_* functions below were emitted verbatim from the canonical
+# engine at generation time, so this helper cannot drift from it. The static
+# fallback data file is read from disk at runtime (never embedded here).
+set -eo pipefail
+__log() { echo "[$(date -Iseconds)] [$1] $2"; }
+info()  { __log "INFO" "$1"; }
+warn()  { __log "WARN" "$1"; }
+FAIL2BAN_JAIL_D=/etc/fail2ban/jail.d
+FAIL2BAN_DROP_IN=$FAIL2BAN_JAIL_D/10-lds-ignoreip.conf
+FAIL2BAN_CACHE=/var/lib/host-hygiene/fail2ban-cidrs.txt
+F2B_REFRESH_HDR
+	declare -f fail2ban_cidr_ok
+	declare -f fail2ban_fallback_file
+	declare -f fail2ban_github_actions
+	declare -f fail2ban_ignoreip_dropin
+	declare -f fail2ban_ignoreip_reload
+	declare -f fail2ban_ignoreip_apply
+	printf '%s\n' "fail2ban_ignoreip_apply"
+}
+
+info "fail2ban-ignoreip: drop-in=$FAIL2BAN_DROP_IN cache=$FAIL2BAN_CACHE refresh=$HYGIENE_FAIL2BAN_REFRESH extra_ips=${HYGIENE_FAIL2BAN_IGNOREIP:-none}"
+if [ "$MODE" = check ]; then
+	# Read-only: render every fail2ban artifact for comparison and let the
+	# report decide. The drop-in renders from the RESOLVED-LIST CACHE only —
+	# --check never fetches (no curl/wget), never writes (no cache write, no
+	# daemon-reload, no timer enable, no fail2ban-client) and never resolves:
+	# the cache IS the deterministic range source. An absent/unusable cache
+	# makes the drop-in CANNOT-EVALUATE (the expected content is unknowable
+	# without the resolved list; a check must not fetch or fabricate it).
+	cache_live="$FAIL2BAN_CACHE"
+	[ -n "${HYGIENE_ROOT:-}" ] && cache_live="$HYGIENE_ROOT/${FAIL2BAN_CACHE#/}"
+	FAIL2BAN_CIDRS=""
+	if [ -r "$cache_live" ]; then
+		cache_acc=""
+		while IFS= read -r cache_line || [ -n "$cache_line" ]; do
+			case "$cache_line" in
+				\#*|"") continue ;;
+			esac
+			if fail2ban_cidr_ok "$cache_line"; then
+				cache_acc="$cache_acc $cache_line"
+			else
+				warn "fail2ban-ignoreip: malformed CIDR \"$cache_line\" in resolved-list cache $cache_live — refusing to evaluate against a partial list" >&2
+				cache_acc=""
+				break
+			fi
+		done < "$cache_live"
+		FAIL2BAN_CIDRS="${cache_acc# }"
+	else
+		warn "fail2ban-ignoreip: resolved-list cache missing ($cache_live) — cannot evaluate the drop-in without it (check is read-only: no fetch, no write); run --apply to resolve and cache the list" >&2
+	fi
+	hygiene_install "$FAIL2BAN_DROP_IN" fail2ban_ignoreip_dropin 0644
+	# The refresh trio is checked under the SAME gate apply installs it:
+	# refresh enabled AND fail2ban-client present.
+	if [ "$HYGIENE_FAIL2BAN_REFRESH" = "true" ] && command -v fail2ban-client >/dev/null 2>&1; then
+		hygiene_install "$FAIL2BAN_REFRESH_SCRIPT" render_fail2ban_ignoreip_refresh_script 0755
+		hygiene_install "$FAIL2BAN_REFRESH_SERVICE" render_fail2ban_refresh_service 0644
+		hygiene_install "$FAIL2BAN_REFRESH_TIMER"   render_fail2ban_refresh_timer 0644
+	else
+		if [ "$HYGIENE_FAIL2BAN_REFRESH" = "true" ]; then
+			warn "fail2ban-ignoreip refresh: not checked — fail2ban-client not found (matches apply: the refresh unit is only installed when fail2ban is present)"
+		else
+			warn "fail2ban-ignoreip refresh: not checked — HYGIENE_FAIL2BAN_REFRESH=$HYGIENE_FAIL2BAN_REFRESH (matches apply's skip)"
+		fi
+	fi
+elif [ -n "$HYGIENE_DRY_RUN" ]; then
+	# Resolve (network permitted — dry-run prints the real rendered content);
+	# the cache itself is written only by real apply.
+	if ! ranges=$(fail2ban_github_actions); then
 		error "fail2ban-ignoreip: cannot resolve GitHub ranges (live fetch failed and static fallback file unavailable/malformed) — skipping the drop-in write (never an empty/partial exemption); fix network or point HYGIENE_FAIL2BAN_FALLBACK_FILE at a valid file"
 		exit 1
 	fi
-	info "DRY RUN: would write $FAIL2BAN_DROP_IN (mode 0644) — rendered content:"
+	FAIL2BAN_CIDRS=$ranges
+	rendered=$(fail2ban_ignoreip_dropin)
+	info "DRY RUN: would write $FAIL2BAN_CACHE (resolved ranges) and $FAIL2BAN_DROP_IN (mode 0644) — rendered content:"
 	printf '%s\n' "$rendered" | sed 's/^/    | /'
 	if [ "$HYGIENE_FAIL2BAN_REFRESH" != "true" ]; then
 		info "DRY RUN: refresh unit skipped (HYGIENE_FAIL2BAN_REFRESH=$HYGIENE_FAIL2BAN_REFRESH)"
@@ -1011,43 +1133,18 @@ else
 		# (single implementation: the helper embeds the fail2ban_*
 		# functions verbatim, so it can never drift from the engine).
 		mkdir -p /usr/local/bin /etc/systemd/system
-		{
-			cat <<'F2B_REFRESH_HDR'
-#!/bin/bash
-# fail2ban-ignoreip-refresh.sh — weekly re-resolve of the GitHub Actions
-# runner ranges into the fail2ban sshd ignoreip drop-in.
-# GENERATED by scripts/host-hygiene.sh section 6. Single implementation:
-# the fail2ban_* functions below were extracted verbatim from the canonical
-# engine at generation time, so this helper cannot drift from it. The static
-# fallback data file is read from disk at runtime (never embedded here).
-set -eo pipefail
-__log() { echo "[$(date -Iseconds)] [$1] $2"; }
-info()  { __log "INFO" "$1"; }
-warn()  { __log "WARN" "$1"; }
-FAIL2BAN_JAIL_D=/etc/fail2ban/jail.d
-FAIL2BAN_DROP_IN=$FAIL2BAN_JAIL_D/10-lds-ignoreip.conf
-F2B_REFRESH_HDR
-			sed -n '/^fail2ban_cidr_ok() {/,/^}/p' "$0"
-			sed -n '/^fail2ban_fallback_file() {/,/^}/p' "$0"
-			sed -n '/^fail2ban_github_actions() {/,/^}/p' "$0"
-			sed -n '/^fail2ban_ignoreip_dropin() {/,/^}/p' "$0"
-			sed -n '/^fail2ban_ignoreip_reload() {/,/^}/p' "$0"
-			sed -n '/^fail2ban_ignoreip_apply() {/,/^}/p' "$0"
-			printf '%s\n' "fail2ban_ignoreip_apply"
-		} > "$FAIL2BAN_REFRESH_SCRIPT.tmp"
+		render_fail2ban_ignoreip_refresh_script > "$FAIL2BAN_REFRESH_SCRIPT.tmp"
 		chmod 0755 "$FAIL2BAN_REFRESH_SCRIPT.tmp"
-		mv -f "$FAIL2BAN_REFRESH_SCRIPT.tmp" "$FAIL2BAN_REFRESH_SCRIPT"
-		bash -n "$FAIL2BAN_REFRESH_SCRIPT" || {
+		bash -n "$FAIL2BAN_REFRESH_SCRIPT.tmp" || {
+			rm -f "$FAIL2BAN_REFRESH_SCRIPT.tmp"
 			error "generated $FAIL2BAN_REFRESH_SCRIPT failed bash -n — aborting"
 			exit 1
 		}
+		mv -f "$FAIL2BAN_REFRESH_SCRIPT.tmp" "$FAIL2BAN_REFRESH_SCRIPT"
 		info "fail2ban-ignoreip refresh helper written: $FAIL2BAN_REFRESH_SCRIPT"
 
-		fail2ban_refresh_unit service > "$FAIL2BAN_REFRESH_SERVICE.tmp"
-		fail2ban_refresh_unit timer   > "$FAIL2BAN_REFRESH_TIMER.tmp"
-		chmod 0644 "$FAIL2BAN_REFRESH_SERVICE.tmp" "$FAIL2BAN_REFRESH_TIMER.tmp"
-		mv -f "$FAIL2BAN_REFRESH_SERVICE.tmp" "$FAIL2BAN_REFRESH_SERVICE"
-		mv -f "$FAIL2BAN_REFRESH_TIMER.tmp" "$FAIL2BAN_REFRESH_TIMER"
+		hygiene_install "$FAIL2BAN_REFRESH_SERVICE" render_fail2ban_refresh_service 0644
+		hygiene_install "$FAIL2BAN_REFRESH_TIMER"   render_fail2ban_refresh_timer 0644
 		systemctl_apply daemon-reload
 		systemctl_apply enable --now fail2ban-ignoreip-refresh.timer
 		info "fail2ban-ignoreip refresh timer installed and enabled (weekly, Persistent=false — reloads only on change)"
@@ -1078,8 +1175,25 @@ first_diff_line() { # rendered, live — prints first differing line number
 	fi
 }
 
+# Returns the reason recorded for a path whose render failed in --check mode
+# (HYGIENE_RENDER_FAILS carries "path|reason" lines captured from the render's
+# own stderr), or nothing if the path rendered cleanly.
+hygiene_check_render_fail_reason() { # $1 = path
+	local entry rpath rreason
+	while IFS= read -r entry; do
+		[ -n "$entry" ] || continue
+		rpath="${entry%%|*}"
+		rreason="${entry#*|}"
+		if [ "$rpath" = "$1" ]; then
+			printf '%s\n' "$rreason"
+			return 0
+		fi
+	done <<< "$HYGIENE_RENDER_FAILS"
+	return 1
+}
+
 hygiene_check_report() {
-	local entry path fn mode rend live ok=0 drift=0 cannot=0 line rline lline
+	local entry path fn mode rend live ok=0 drift=0 cannot=0 line rline lline reason
 	for entry in "${HYGIENE_ARTIFACTS[@]}"; do
 		path="${entry%%|*}"
 		rest="${entry#*|}"
@@ -1087,8 +1201,9 @@ hygiene_check_report() {
 		mode="${rest#*|}"
 		rend="$CHECK_TMP$path"
 		if [ -n "${HYGIENE_ROOT:-}" ]; then live="$HYGIENE_ROOT/${path#/}"; else live="$path"; fi
-		if [[ " $HYGIENE_RENDER_FAILS " == *" $path "* ]]; then
-			printf 'CANNOT-EVALUATE %s  (render failed)\n' "$path"
+		reason="$(hygiene_check_render_fail_reason "$path")"
+		if [ -n "$reason" ]; then
+			printf 'CANNOT-EVALUATE %s  (%s)\n' "$path" "$reason"
 			cannot=$((cannot + 1))
 			continue
 		fi
