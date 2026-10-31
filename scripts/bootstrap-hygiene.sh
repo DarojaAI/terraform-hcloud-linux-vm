@@ -4,9 +4,9 @@
 #
 # Applies ALL generic host-hygiene bounds the L1 module provisions on new
 # VMs — journald cap, docker-prune timer, unattended security upgrades,
-# disk-watch alarm — by running the shared engine scripts/host-hygiene.sh
-# from this checkout. Dry-run by default; pass --apply to install. Safe:
-# installs only, never deletes anything by hand.
+# disk-watch alarm, sshd connection bounds — by running the shared engine
+# scripts/host-hygiene.sh from this checkout. Dry-run by default; pass
+# --apply to install. Safe: installs only, never deletes anything by hand.
 #
 # Usage (as root on the target VM, from the L1 checkout):
 #   sudo bash scripts/bootstrap-hygiene.sh               # dry run (default)
@@ -19,6 +19,10 @@
 #   HYGIENE_UNATTENDED_UPGRADES   true|false — security auto-upgrades (default true)
 #   HYGIENE_DISK_ALERT_PCT        root-used % alarm threshold; 0 disables (default 85)
 #   HYGIENE_DISK_WEBHOOK_URL      webhook for alarm POSTs; empty = off (default off)
+#   HYGIENE_SSHD_MAX_STARTUPS     sshd MaxStartups triple  (default 40:30:100); 0/empty = don't manage sshd
+#   HYGIENE_SSHD_MAX_SESSIONS     sshd MaxSessions (default 20)
+#   HYGIENE_SSHD_KEEPALIVE_INTERVAL  sshd ClientAliveInterval seconds (default 60)
+#   HYGIENE_SSHD_KEEPALIVE_COUNT  sshd ClientAliveCountMax (default 3)
 set -euo pipefail
 
 usage() {
@@ -32,6 +36,8 @@ Usage: sudo bash scripts/bootstrap-hygiene.sh [--apply]
     HYGIENE_JOURNALD_MAX_USE=1G HYGIENE_DOCKER_PRUNE=true
     HYGIENE_DOCKER_PRUNE_UNTIL=168h HYGIENE_UNATTENDED_UPGRADES=true
     HYGIENE_DISK_ALERT_PCT=85 HYGIENE_DISK_WEBHOOK_URL=https://...
+    HYGIENE_SSHD_MAX_STARTUPS=40:30:100 HYGIENE_SSHD_MAX_SESSIONS=20
+    HYGIENE_SSHD_KEEPALIVE_INTERVAL=60 HYGIENE_SSHD_KEEPALIVE_COUNT=3
 EOF
 }
 
