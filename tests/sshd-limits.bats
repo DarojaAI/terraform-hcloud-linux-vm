@@ -81,10 +81,15 @@ render() {
 }
 
 @test "dry-run prints the sshd section and writes nothing on this host" {
+	# A dry run must print the section and leave the real drop-in untouched,
+	# whether the host already has one (this box does — hand-applied) or not.
+	SSH_DROP_IN=/etc/ssh/sshd_config.d/09-sshd-limits.conf
+	before="$(stat -c '%i %Y %s' "$SSH_DROP_IN" 2>/dev/null || echo ABSENT)"
 	run env HYGIENE_DRY_RUN=1 bash "$ENGINE"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -qi 'sshd bounds'
 	echo "$output" | grep -qiE 'DRY RUN: would write .*09-sshd-limits'
 	# hermetic: the real /etc/ssh must be untouched after a dry run
-	[ ! -e /etc/ssh/sshd_config.d/09-sshd-limits.conf ]
+	after="$(stat -c '%i %Y %s' "$SSH_DROP_IN" 2>/dev/null || echo ABSENT)"
+	[ "$before" = "$after" ]
 }

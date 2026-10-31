@@ -400,9 +400,10 @@ Already-provisioned VMs get the same bounds in ~2 minutes with the idempotent
 bootstrapper (dry-run by default; installs only, never deletes anything):
 
 ```bash
-# On the target VM, as root, from this checkout:
+# On the target VM, from this checkout:
 sudo bash scripts/bootstrap-hygiene.sh            # dry run — prints what would change
 sudo bash scripts/bootstrap-hygiene.sh --apply    # apply (idempotent — re-run anytime)
+bash scripts/bootstrap-hygiene.sh --check        # read-only drift report (no root)
 ```
 
 Per-run overrides use `HYGIENE_*` env vars matching the module defaults, e.g.:
@@ -413,6 +414,31 @@ sudo HYGIENE_DISK_ALERT_PCT=90 bash scripts/bootstrap-hygiene.sh --apply
 
 The engine also self-copies to `/opt/host-hygiene.sh`, so a re-run is just
 `sudo bash /opt/host-hygiene.sh` (no checkout needed).
+
+### Detecting drift (`--check`)
+
+`--check` answers, read-only and without root: *"does this host still match
+what this engine would write?"* It renders every managed artifact into a temp
+dir and compares it byte-for-byte with the live file — nothing is mutated,
+nothing is reloaded, and no `systemctl`/`sshd`/`apt` is ever invoked:
+
+```bash
+bash scripts/bootstrap-hygiene.sh --check      # or: bash /opt/host-hygiene.sh --check
+```
+
+One line per artifact (path included, so the report pastes straight into an
+issue), plus a summary count. Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | clean — every managed artifact matches |
+| `1` | drift — artifact missing or content differs (first differing line shown) |
+| `2` | cannot evaluate — a live file is not readable or a render failed |
+
+This is the drift input to the deploy gate: the `linux-desktop-seed`
+`verify-vm-state` check (and the future L2 executor) calls `--check` and
+refuses to proceed on non-zero, so a host that drifted from provisioning is
+re-asserted with `--apply` instead of silently deploying on stale state.
 
 ### Layering
 
@@ -499,7 +525,7 @@ terraform-hcloud-linux-desktop/
 │   ├── host-hygiene.sh      ← generic hygiene engine (journald, docker-prune, upgrades, disk-watch, sshd bounds)
 │   └── bootstrap-hygiene.sh ← idempotent bootstrap for already-provisioned VMs
 ├── variables.tf    ← all configurable inputs (incl. host-hygiene knobs)
-├── tests/          ← hermetic self-tests (tests/sshd-limits.bats)
+├── tests/          ← hermetic self-tests (tests/sshd-limits.bats, tests/hygiene-check.bats)
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
 ├── README.md       ← this file
