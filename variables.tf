@@ -58,6 +58,22 @@ variable "labels" {
 }
 
 # =============================================================================
+# Backups and protection
+# =============================================================================
+
+variable "enable_backups" {
+  description = "Turn on Hetzner's automatic daily server backups. This is a paid add-on, priced per server. The images are disk copies taken while the server runs, so treat them as crash-consistent, and they belong to the same Hetzner project as the server, so they do not replace an off-site backup."
+  type        = bool
+  default     = false
+}
+
+variable "enable_protection" {
+  description = "Turn on delete protection and rebuild protection for the server. The API requires the two to match, so this one variable sets both. While true, deleting or rebuilding the server fails, in Terraform and in the Hetzner API, until protection is turned off."
+  type        = bool
+  default     = false
+}
+
+# =============================================================================
 # Host hygiene (generic, workload-agnostic bounds — L1 scope)
 # =============================================================================
 

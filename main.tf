@@ -51,6 +51,14 @@ resource "hcloud_server" "main" {
 
   labels = var.labels
 
+  # Both off by default: backups are a paid add-on, and protection blocks every
+  # delete and rebuild until it is turned off again (README "Backups and
+  # protection"). The API requires delete and rebuild protection to match, so
+  # one variable sets both.
+  backups            = var.enable_backups
+  delete_protection  = var.enable_protection
+  rebuild_protection = var.enable_protection
+
   lifecycle {
     prevent_destroy = true
 
