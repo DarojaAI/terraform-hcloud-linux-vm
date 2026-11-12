@@ -204,6 +204,8 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `fail2ban_ignoreip` | Extra CIDRs appended to the fail2ban sshd jail's `ignoreip` (`10-lds-ignoreip.conf`), on top of loopback + GitHub Actions runner ranges resolved from `api.github.com/meta` | `string` | `""` | No |
 | `fail2ban_refresh` | Install the weekly `fail2ban-ignoreip-refresh` timer (re-resolves GitHub ranges, reloads only on change) | `bool` | `true` | No |
 | `sysctl_forwarding` | Write the forwarding drop-in `90-host-hygiene-forwarding.conf` (`net.ipv4.ip_forward=1`, `net.ipv6.conf.all.forwarding=1`), apply it, and assert the effective values from `/proc/sys`; `false` stops managing forwarding | `bool` | `true` | No |
+| `enable_backups` | Turn on Hetzner's automatic daily server backups (paid add-on). See [Backups and protection](#backups-and-protection) | `bool` | `false` | No |
+| `enable_protection` | Turn on delete and rebuild protection for the server. See [Backups and protection](#backups-and-protection) | `bool` | `false` | No |
 
 #### Server Type Reference
 
@@ -264,6 +266,28 @@ This separates state from the module. State files contain sensitive data — use
 - Use remote backend with encryption (S3, Terraform Cloud)
 - Never commit `.tfstate` files to version control
 - Rotate tokens periodically via Hetzner console
+
+### Backups and protection
+
+Both options are off by default.
+
+**`enable_backups`** turns on Hetzner's automatic server backups: a daily copy of the server's disk, with seven slots per server, where a new backup replaces the oldest once all seven are used. Attached volumes are not included.
+
+- It's a paid add-on, priced per server. Check the current price on Hetzner's [cloud pricing page](https://www.hetzner.com/cloud) before you turn it on.
+- The disk is copied while the server runs, so treat a backup as crash-consistent. Databases recover the way they would after a power cut.
+- Backups live in the same Hetzner project as the server, so anyone holding that project's API token can reach them. This is a stopgap against losing a disk, not a replacement for an off-site backup in a separate account or project.
+
+**`enable_protection`** turns on delete protection and rebuild protection together, because the Hetzner API requires them to match. While it's on, any attempt to delete or rebuild the server fails, in Terraform and through the API.
+
+To replace or remove a protected server on purpose, first set `enable_protection = false` and apply, then make the change. The module also sets `prevent_destroy`, which stops Terraform destroying the server whatever this option says. Protection adds the same guard for changes made outside Terraform, such as the console or another API client.
+
+```hcl
+module "linux_desktop" {
+  # ...
+  enable_backups    = true
+  enable_protection = true
+}
+```
 
 ### SSH Access
 - Prefer `hetzner_ssh_key_name` or `ssh_keys` over `ssh_public_key` where possible

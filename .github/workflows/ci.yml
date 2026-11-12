@@ -51,6 +51,11 @@ jobs:
           terraform init -backend=false -input=false -no-color
           terraform validate -no-color
 
+      # Plans against a mocked provider (mock_provider needs Terraform 1.7+):
+      # no token, no API call, nothing created.
+      - name: terraform test
+        run: terraform test -no-color
+
   provisioning-shell:
     name: Provisioning scripts (shellcheck + bats)
     runs-on: ubuntu-latest
