@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   semantic-release:
-    uses: DarojaAI/infra-actions/.github/workflows/reusable-semantic-release.yml@main
+    uses: DarojaAI/public-workflows/.github/workflows/reusable-semantic-release.yml@832bde0db33f72c57fe9044fa53c5ac8e0a39794  # v2.2.0
     with:
       skip-dirty-check: true
     secrets:
