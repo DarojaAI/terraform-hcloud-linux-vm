@@ -180,3 +180,14 @@ variable "hygiene_packages" {
   type        = list(string)
   default     = []
 }
+
+variable "first_boot_extra_script" {
+  description = "Optional bash script run as root at the end of first boot, after host hygiene (e.g. fetch secrets, install an agent). Only reaches new servers: user_data is ignore_changes, so editing it never recreates a live one. Must be idempotent: re-running /opt/first-boot.sh re-runs it. Do not inline secrets: user_data is stored in plain text in Terraform state, readable through the Hetzner API and the metadata service, and left on disk; have the script fetch them instead."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !can(regex("FIRST_BOOT_EXTRA_EMBEDDED_EOF", var.first_boot_extra_script))
+    error_message = "first_boot_extra_script must not contain the heredoc delimiter FIRST_BOOT_EXTRA_EMBEDDED_EOF."
+  }
+}
