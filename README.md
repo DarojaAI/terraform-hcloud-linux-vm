@@ -87,31 +87,34 @@ Before you can use this module, you need:
 Create a file called `main.tf` in your project directory:
 
 ```hcl
-module "linux_desktop" {
-  source  = "DarojaAI/linux-desktop/hcloud"
-  version = "1.0.0"
+module "vm" {
+  source = "git::https://github.com/DarojaAI/terraform-hcloud-linux-vm.git?ref=v1.3.0"
 
-  hcloud_token = "your_hetzner_api_token"
-  server_name  = "my-desktop"
+  hcloud_token = var.hcloud_token
+  server_name  = "my-server"
   location     = "fsn1"
-  server_type  = "cpx41"
-  image        = "ubuntu-22.04"
+  server_type  = "cpx22"
+  image        = "ubuntu-24.04"
 
   hetzner_ssh_key_name = "my-ssh-key"
 
+  create_firewall = false # linux-desktop-seed's Paperclip test firewall
+  enable_firewall = true
+  ssh_source_ips  = ["203.0.113.0/24"] # who may SSH in
+
   labels = {
-    project    = "linux-desktop"
+    project    = "my-project"
     managed_by = "terraform"
   }
 }
 
 output "connection_info" {
-  value     = module.linux_desktop.connection_info
+  value     = module.vm.connection_info
   sensitive = true
 }
 
 output "ipv4_address" {
-  value = module.linux_desktop.ipv4_address
+  value = module.vm.ipv4_address
 }
 ```
 
@@ -207,7 +210,7 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `ssh_source_ips` | CIDRs allowed to reach SSH when the firewall is on. Required with `enable_firewall`; `0.0.0.0/0` and `::/0` are refused | `list(string)` | `[]` | With `enable_firewall` |
 | `allow_icmp` | Allow inbound ICMP (ping) when the firewall is on | `bool` | `true` | No |
 | `firewall_extra_rules` | Extra inbound rules: list of `{ protocol = "tcp"\|"udp", port, source_ips, description }`; `port` may be a range | `list(object)` | `[]` | No |
-| `first_boot_extra_script` | Bash script run as root at the end of first boot, after host hygiene. New servers only (`user_data` is ignored after creation). Never inline secrets: `user_data` is readable through the Hetzner API and from inside the server; fetch them from the script | `string` | `""` | No |
+| `first_boot_extra_script` | Bash script run as root at the end of first boot, after host hygiene; if it fails, first boot exits non-zero. New servers only (`user_data` is ignored after creation). Must be idempotent: re-running `/opt/first-boot.sh` re-runs it. Never inline secrets: `user_data` is stored in plain text in Terraform state, readable through the Hetzner API and the metadata service, and left on disk; have the script fetch them | `string` | `""` | No |
 | `create_firewall`, `firewall_target_env` | Linux-desktop-seed's Paperclip test firewall (TCP 80/443 from anywhere, only when `firewall_target_env = "test"`). Set `create_firewall = false` unless you want it; it will move out of this module in the next major release | `bool`, `string` | `true`, `"test"` | No |
 | `sysctl_forwarding` | Write the forwarding drop-in `90-host-hygiene-forwarding.conf` (`net.ipv4.ip_forward=1`, `net.ipv6.conf.all.forwarding=1`), apply it, and assert the effective values from `/proc/sys`; `false` stops managing forwarding | `bool` | `true` | No |
 
@@ -529,7 +532,7 @@ per-workload retention policies belong.
 - **In-place OS upgrades (same instance, `ignore_changes = [image]`) do not
   re-run `user_data`.** The pin survives because `/opt` is untouched; to
   re-assert after drift, run `sudo bash /opt/git-pin.sh`.
-- **No firewall rules** — must be created separately
+- **Firewall is opt-in** — set `enable_firewall` (see [Firewall](#firewall)); without one, every listening port is public
 - **No multi-region** — this module creates a single server in one location
 - **No high availability** — single VM, single AZ
 - **No automatic backups** — configure via Hetzner backup schedule manually

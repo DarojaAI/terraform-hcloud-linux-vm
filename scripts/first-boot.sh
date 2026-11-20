@@ -81,17 +81,18 @@ __log "deployed fail2ban ignoreip static fallback data ($F2B_FALLBACK)"
 
 __log "running host-hygiene engine (13 knobs from module variables)"
 bash "$HYGIENE_ENGINE"
+
 # ── 3. caller's own first-boot steps (var.first_boot_extra_script) ──
 # Runs last, as root, only when the caller supplied a script. Not shell-expanded
 # on the way in (quoted heredoc), so the caller's script arrives verbatim.
 # shellcheck disable=SC2154
 if [ -n "${first_boot_extra_script_present}" ]; then
-	EXTRA=/opt/first-boot-extra.sh
-	cat > "$EXTRA.tmp" <<'FIRST_BOOT_EXTRA_EMBEDDED_EOF'
+    EXTRA=/opt/first-boot-extra.sh
+    cat > "$EXTRA.tmp" <<'FIRST_BOOT_EXTRA_EMBEDDED_EOF'
 ${first_boot_extra_script}
 FIRST_BOOT_EXTRA_EMBEDDED_EOF
-	chmod 0700 "$EXTRA.tmp"
-	mv -f "$EXTRA.tmp" "$EXTRA"
-	__log "running caller first-boot script ($EXTRA)"
-	bash "$EXTRA"
+    chmod 0700 "$EXTRA.tmp"
+    mv -f "$EXTRA.tmp" "$EXTRA"
+    __log "running caller first-boot script ($EXTRA)"
+    bash "$EXTRA"
 fi

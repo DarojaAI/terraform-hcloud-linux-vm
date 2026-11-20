@@ -24,8 +24,17 @@ variable "ssh_source_ips" {
   default     = []
 
   validation {
-    condition     = !contains(var.ssh_source_ips, "0.0.0.0/0") && !contains(var.ssh_source_ips, "::/0")
-    error_message = "ssh_source_ips must not contain 0.0.0.0/0 or ::/0. List the ranges that need SSH (VPN, bastion, CI runners)."
+    condition     = alltrue([for c in var.ssh_source_ips : can(cidrhost(c, 0))])
+    error_message = "ssh_source_ips must be CIDRs, e.g. 203.0.113.0/24 or 2001:db8::/32."
+  }
+
+  # Refuse any range that covers the whole IPv4 or IPv6 space, however it is
+  # spelled (0.0.0.0/0, ::/0, 0::/0, ...). Splitting it into halves
+  # (0.0.0.0/1 + 128.0.0.0/1) is not caught; the firewall is meant for real
+  # allow-lists.
+  validation {
+    condition     = alltrue([for c in var.ssh_source_ips : !can(cidrhost(c, 0)) || tonumber(split("/", c)[1]) > 0])
+    error_message = "ssh_source_ips must not open SSH to the whole internet (a /0 range). Leave the firewall off for that."
   }
 }
 

@@ -73,3 +73,25 @@ run "ssh_open_to_internet_is_refused" {
 
   expect_failures = [var.ssh_source_ips]
 }
+
+run "ssh_open_to_internet_other_spelling_is_refused" {
+  command = plan
+
+  variables {
+    enable_firewall = true
+    ssh_source_ips  = ["0::/0"]
+  }
+
+  expect_failures = [var.ssh_source_ips]
+}
+
+run "ssh_source_ips_must_be_cidrs" {
+  command = plan
+
+  variables {
+    enable_firewall = true
+    ssh_source_ips  = ["not-a-cidr"]
+  }
+
+  expect_failures = [var.ssh_source_ips]
+}
