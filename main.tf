@@ -1,7 +1,7 @@
 # =============================================================================
-# Terraform Module: hcloud-linux-desktop
+# Terraform Module: terraform-hcloud-linux-vm
 # =============================================================================
-# Provisions a Linux desktop server on Hetzner Cloud
+# Provisions a hardened Linux server on Hetzner Cloud
 
 provider "hcloud" {
   token = var.hcloud_token
@@ -47,6 +47,8 @@ resource "hcloud_server" "main" {
     hygiene_fail2ban_refresh         = tostring(var.fail2ban_refresh)
     fail2ban_cidrs_file              = file("${path.module}/etc/fail2ban/github-actions-cidrs.txt")
     hygiene_sysctl_forwarding        = tostring(var.sysctl_forwarding)
+    first_boot_extra_script          = var.first_boot_extra_script
+    first_boot_extra_script_present  = var.first_boot_extra_script != "" ? "1" : ""
   })
 
   labels = var.labels

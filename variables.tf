@@ -180,3 +180,9 @@ variable "hygiene_packages" {
   type        = list(string)
   default     = []
 }
+
+variable "first_boot_extra_script" {
+  description = "Optional bash script run as root at the end of first boot, after host hygiene (e.g. fetch secrets, install an agent). Only reaches new servers: user_data is ignore_changes, so editing it never recreates a live one. Do not inline secrets here: user_data is readable through the Hetzner API and from inside the server; have the script fetch them instead."
+  type        = string
+  default     = ""
+}

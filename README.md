@@ -1,6 +1,6 @@
-# terraform-hcloud-linux-desktop
+# terraform-hcloud-linux-vm
 
-Terraform module for provisioning a Linux desktop server on Hetzner Cloud.
+Terraform module for provisioning a hardened Linux server on Hetzner Cloud: the server, an optional firewall, and first-boot host hygiene, for any workload.
 
 **Status:** Production-ready. Tested with Hetzner Cloud, Terraform 1.x, hetznercloud/hcloud provider >= 1.47.
 
@@ -31,9 +31,9 @@ Terraform module for provisioning a Linux desktop server on Hetzner Cloud.
 
 ## What Problem Does This Solve?
 
-Provision a Linux desktop server on Hetzner Cloud in a single `terraform apply` — no manual cloud console work. Designed to work with the [linux-desktop-seed](https://github.com/DarojaAI/linux-desktop-seed) deployment scripts which handle OS setup, RDP, and development tools after the VM is created.
+Provision a hardened Linux server on Hetzner Cloud in a single `terraform apply`, with no manual cloud console work. What runs on it afterwards is up to you: deploy containers over SSH, run your own first-boot script (`first_boot_extra_script`), or hand over to a configuration tool.
 
-**Typical workflow:**
+**Example workflow** ([linux-desktop-seed](https://github.com/DarojaAI/linux-desktop-seed), a remote Linux desktop):
 
 ```
 terraform apply (this module) → creates VM with public IP
@@ -203,6 +203,12 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `sshd_persource_penalties` | `PerSourcePenalties` keyword overrides for the same drop-in (issue #11); default `"noauth:0"` disables the pre-auth-connection priming term, other keywords keep distro defaults; `""` leaves the distro policy untouched | `string` | `"noauth:0"` | No |
 | `fail2ban_ignoreip` | Extra CIDRs appended to the fail2ban sshd jail's `ignoreip` (`10-lds-ignoreip.conf`), on top of loopback + GitHub Actions runner ranges resolved from `api.github.com/meta` | `string` | `""` | No |
 | `fail2ban_refresh` | Install the weekly `fail2ban-ignoreip-refresh` timer (re-resolves GitHub ranges, reloads only on change) | `bool` | `true` | No |
+| `enable_firewall` | Create and attach the general firewall. When on, inbound traffic is limited to SSH from `ssh_source_ips`, ICMP (if `allow_icmp`) and `firewall_extra_rules`. Off by default in 1.x | `bool` | `false` | No |
+| `ssh_source_ips` | CIDRs allowed to reach SSH when the firewall is on. Required with `enable_firewall`; `0.0.0.0/0` and `::/0` are refused | `list(string)` | `[]` | With `enable_firewall` |
+| `allow_icmp` | Allow inbound ICMP (ping) when the firewall is on | `bool` | `true` | No |
+| `firewall_extra_rules` | Extra inbound rules: list of `{ protocol = "tcp"\|"udp", port, source_ips, description }`; `port` may be a range | `list(object)` | `[]` | No |
+| `first_boot_extra_script` | Bash script run as root at the end of first boot, after host hygiene. New servers only (`user_data` is ignored after creation). Never inline secrets: `user_data` is readable through the Hetzner API and from inside the server; fetch them from the script | `string` | `""` | No |
+| `create_firewall`, `firewall_target_env` | Linux-desktop-seed's Paperclip test firewall (TCP 80/443 from anywhere, only when `firewall_target_env = "test"`). Set `create_firewall = false` unless you want it; it will move out of this module in the next major release | `bool`, `string` | `true`, `"test"` | No |
 | `sysctl_forwarding` | Write the forwarding drop-in `90-host-hygiene-forwarding.conf` (`net.ipv4.ip_forward=1`, `net.ipv6.conf.all.forwarding=1`), apply it, and assert the effective values from `/proc/sys`; `false` stops managing forwarding | `bool` | `true` | No |
 
 #### Server Type Reference
@@ -228,6 +234,8 @@ Provider is configured automatically by this module. You only need to pass `hclo
 | `ipv6_address` | Public IPv6 address |
 | `connection_info` | Ready-to-use SSH command. Example: `ssh -o StrictHostKeyChecking=no root@123.456.78.90` |
 | `server_status` | Current server status: `running`, `off`, `creating`, `deleting` |
+| `general_firewall_id` | ID of the general firewall, or `null` when `enable_firewall` is false |
+| `firewall_id`, `firewall_name` | ID and name of the Paperclip test firewall, or `null` when it is not created |
 
 ### Configuration
 
@@ -270,32 +278,25 @@ This separates state from the module. State files contain sensitive data — use
 - If using `ssh_public_key`, ensure the private key is stored securely
 
 ### Firewall
-This module does not create firewall rules. After provisioning, ensure port 3389 is open for RDP if you plan to use the desktop. Example with `hcloud_firewall`:
+Hetzner drops all inbound traffic that an attached firewall does not allow. Without a firewall, every port the server listens on is reachable from the internet. Turn on the general firewall and list who needs SSH:
 
 ```hcl
-resource "hcloud_firewall" "desktop" {
-  name = "desktop-fw"
+module "vm" {
+  source = "git::https://github.com/DarojaAI/terraform-hcloud-linux-vm.git?ref=v1.3.0"
 
-  rule {
-    direction = "in"
-    protocol   = "tcp"
-    port       = "22"
-    source_ips  = ["0.0.0.0/0", "::/0"]
-  }
+  hcloud_token    = var.hcloud_token
+  server_name     = "app-1"
+  create_firewall = false # the Paperclip test firewall; leave off unless you need it
 
-  rule {
-    direction = "in"
-    protocol   = "tcp"
-    port       = "3389"
-    source_ips  = ["0.0.0.0/0"]  # restrict to your IP in production
-  }
-
-  apply_to {
-    type = "server"
-    id   = module.linux_desktop.server_id
-  }
+  enable_firewall = true
+  ssh_source_ips  = ["203.0.113.0/24"] # your VPN, bastion or CI ranges
+  firewall_extra_rules = [
+    { protocol = "tcp", port = "443", source_ips = ["0.0.0.0/0", "::/0"], description = "https" },
+  ]
 }
 ```
+
+Outbound traffic is not restricted. You can attach further firewalls of your own; Hetzner allows the union of their rules. The general firewall is off by default in 1.x so upgrading changes nothing; the next major release turns it on by default.
 
 ---
 
@@ -600,8 +601,9 @@ sudo fail2ban-client status sshd                   # verify the ban list
 ### Module Structure
 
 ```
-terraform-hcloud-linux-desktop/
-├── main.tf         ← hcloud_server resource (first-boot user_data template)
+terraform-hcloud-linux-vm/
+├── main.tf         ← hcloud_server resource (first-boot user_data template), Paperclip test firewall
+├── firewall.tf     ← general firewall (opt-in: enable_firewall)
 ├── scripts/        ← provisioner scripts shipped to the VM
 │   ├── first-boot.sh        ← user_data umbrella: embeds the two engines below
 │   ├── git-pin.sh           ← builds/pins git 2.56.0 at /opt/git-2.56.0 (issue #2323)
@@ -609,7 +611,7 @@ terraform-hcloud-linux-desktop/
 │   └── bootstrap-hygiene.sh ← idempotent bootstrap for already-provisioned VMs
 ├── etc/fail2ban/   ← static fallback data: github-actions-cidrs.txt (GitHub Actions runner ranges)
 ├── variables.tf    ← all configurable inputs (incl. host-hygiene knobs)
-├── tests/          ← hermetic self-tests (sshd-limits.bats, fail2ban-ignoreip.bats, hygiene-check.bats, sysctl-forwarding.bats)
+├── tests/          ← hermetic self-tests (*.bats for the provisioning scripts; firewall.tftest.hcl runs `terraform test` against a mocked provider)
 ├── outputs.tf      ← server connection info
 ├── versions.tf     ← terraform and provider version constraints
 ├── README.md       ← this file
