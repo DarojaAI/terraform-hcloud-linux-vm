@@ -31,9 +31,10 @@ variable "ssh_source_ips" {
   # Refuse any range that covers the whole IPv4 or IPv6 space, however it is
   # spelled (0.0.0.0/0, ::/0, 0::/0, ...). Splitting it into halves
   # (0.0.0.0/1 + 128.0.0.0/1) is not caught; the firewall is meant for real
-  # allow-lists.
+  # allow-lists. (try(): Terraform's || does not short-circuit, and
+  # malformed entries are reported by the CIDR check above.)
   validation {
-    condition     = alltrue([for c in var.ssh_source_ips : !can(cidrhost(c, 0)) || tonumber(split("/", c)[1]) > 0])
+    condition     = alltrue([for c in var.ssh_source_ips : try(tonumber(split("/", c)[1]) > 0, true)])
     error_message = "ssh_source_ips must not open SSH to the whole internet (a /0 range). Leave the firewall off for that."
   }
 }
